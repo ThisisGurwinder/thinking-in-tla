@@ -26,8 +26,7 @@
 <listEntry value="1Invariants"/>
 </listAttribute>
 <listAttribute key="modelCorrectnessProperties">
-<listEntry value="1Properties"/>
-<listEntry value="1EventuallyAllCommit"/>
+<listEntry value="1&lt;&gt;[](\A proc \in Proc : state[proc] \in {&quot;Commit&quot;})"/>
 </listAttribute>
 <stringAttribute key="modelExpressionEval" value=""/>
 <stringAttribute key="modelParameterActionConstraint" value=""/>

@@ -95,16 +95,9 @@ Next == \E self \in Proc
 
 Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
 
-Invariants ==
-  /\ \A proc \in Proc
-     : state[proc] \in {"Init", "Running", "Commit"}
-  /\ \A obj \in Object
-     : Cardinality(WRITE[obj]) \in {0,1}
-  /\ \A obj \in Object
-     : Cardinality(WRITE[obj]) # 0 =>  READ[obj] \in SUBSET WRITE[obj]
-
 (***************************************************************************)
-(* Serializable tests if a history is serializable                         *)
+(* Serializable asserts that, if some of transactions successfully commit, *)
+(* the history of the committed transactions is serializable.              *)
 (***************************************************************************)
 RECURSIVE consistent(_, _)
 consistent(s, hist) ==
@@ -133,19 +126,48 @@ Serializable ==
 \*            /\ \/ Cardinality(Tx) < 2
 \*               \/ PrintT(<<history, concat(perm, 1, Cardinality(Tx), <<>>)>>)
 
-(****************************************************************************
-Properties assert that if some of transactions successfully commit then
-the history of the committed transactions is serializable
-****************************************************************************)
-Properties == []Serializable
+(***************************************************************************)
+(* Invariants are a set of state predicates to assert that all states and  *)
+(* locks are consistent, and if some of transactions successfully commit,  *)
+(* the history of the committed transactions is serializable.              *)
+(***************************************************************************)
+Invariants ==
+  /\ \A proc \in Proc
+     : state[proc] \in {"Init", "Running", "Commit"}
+  /\ \A obj \in Object
+     : Cardinality(WRITE[obj]) \in {0,1}
+  /\ \A obj \in Object
+     : Cardinality(WRITE[obj]) # 0 =>  READ[obj] \in SUBSET WRITE[obj]
+  /\ Serializable
 
 (***************************************************************************)
-(* EventuallyAllCommit is used to detect a deadlock                        *)
+(* Deadlock asserts that a process is stopping in a deadlock               *)
 (***************************************************************************)
-EventuallyAllCommit == <>[](\E proc \in Proc : state[proc] = "Commit")
+Waiting[self \in Proc, blocking \in SUBSET Proc] ==
+  IF self \in blocking \/ state[self] # "Running"
+  THEN {}
+  ELSE LET grandChildren(proc) == Waiting[proc, blocking \cup {self}]
+       IN LET dependsOn(children) ==
+                children \cup UNION {grandChildren(proc) : proc \in children}
+              hd == Head(transact[self])
+          IN  CASE hd.f = "Read"
+                   -> dependsOn(WRITE[hd.obj] \ {self})
+                [] hd.f = "Write"
+                   -> dependsOn((READ[hd.obj] \cup WRITE[hd.obj]) \ {self})
+                [] OTHER -> {}
+
+Deadlock[self \in Proc] == self \in Waiting[self, {}]
+
+(***************************************************************************)
+(* Properties assert that all transactions eventually commit or stop in    *)
+(* deadlock.                                                               *)
+(***************************************************************************)
+Properties ==
+  <>[](\A proc \in Proc : state[proc] \in {"Commit"} \/ Deadlock[proc])
+
 
 THEOREM Spec => []Invariants /\ Properties
 =============================================================================
 \* Modification History
-\* Last modified Sat Feb 17 13:58:11 JST 2018 by takayuki
+\* Last modified Sat Feb 17 21:10:14 JST 2018 by takayuki
 \* Created Sat Feb 17 10:34:44 JST 2018 by takayuki
