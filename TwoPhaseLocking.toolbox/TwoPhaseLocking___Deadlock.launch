@@ -27,7 +27,7 @@
 </listAttribute>
 <listAttribute key="modelCorrectnessProperties">
 <listEntry value="1Properties"/>
-<listEntry value="1Deadlock"/>
+<listEntry value="1EventuallyAllCommit"/>
 </listAttribute>
 <stringAttribute key="modelExpressionEval" value=""/>
 <stringAttribute key="modelParameterActionConstraint" value=""/>
