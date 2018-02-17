@@ -93,7 +93,7 @@ Next == \E self \in Proc
            \/ Write(self, hd, tl)
            \/ Commit(self, hd, tl)
 
-Spec == Init /\ [][Next]_vars
+Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
 
 Invariants ==
   /\ \A proc \in Proc
@@ -131,11 +131,20 @@ Serializable ==
                        concat(perm, 1, Cardinality(Proc), <<>>))
 \*            /\ PrintT(<<history, concat(perm, 1, Cardinality(Proc), <<>>)>>)
 
+(***************************************************************************)
+(* Properties assert that if all transactions successfully commit then the *)
+(* history is serializable                                                 *)
+(***************************************************************************)
 Properties ==
   []((\A proc \in Proc : state[proc] = "Commit") => Serializable)
+
+(***************************************************************************)
+(* Deadlock detects a deadlock                                             *)
+(***************************************************************************)
+Deadlock == <>[](\A proc \in Proc : state[proc] = "Commit")
 
 THEOREM Spec => []Invariants /\ Properties
 =============================================================================
 \* Modification History
-\* Last modified Sat Feb 17 12:52:22 JST 2018 by takayuki
+\* Last modified Sat Feb 17 13:01:22 JST 2018 by takayuki
 \* Created Sat Feb 17 10:34:44 JST 2018 by takayuki
