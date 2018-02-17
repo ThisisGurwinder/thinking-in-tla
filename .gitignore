@@ -1,0 +1,9 @@
+*/.settings
+*/.project
+*/*_SnapShot_*
+*/*.aux
+*/*.log
+*/*.pdf
+*/*.tex
+*/*/
+*~
