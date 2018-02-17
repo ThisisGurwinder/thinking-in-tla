@@ -67,8 +67,8 @@ Write(self, hd, tl) ==
   /\ state[self] \in {"Init", "Running"}
   /\ hd.f = "Write"
   /\ WRITE[hd.obj] \in {{}, {self}}
-  /\ READ[hd.obj] \in SUBSET WRITE[hd.obj]
   /\ WRITE' = [WRITE EXCEPT ![hd.obj] = WRITE[hd.obj] \cup {self}]
+  /\ READ[hd.obj] \in SUBSET WRITE'[hd.obj]
   /\ store' = [store EXCEPT ![hd.obj] = store[hd.obj]+1]
   /\ updateHistory(self, hd, tl, store[hd.obj]+1)
   /\ IF state[self] = "Init"
@@ -137,5 +137,5 @@ Properties ==
 THEOREM Spec => []Invariants /\ Properties
 =============================================================================
 \* Modification History
-\* Last modified Sat Feb 17 12:24:40 JST 2018 by takayuki
+\* Last modified Sat Feb 17 12:52:22 JST 2018 by takayuki
 \* Created Sat Feb 17 10:34:44 JST 2018 by takayuki
