@@ -119,24 +119,25 @@ consistent(s, hist) ==
                 -> consistent(s, Tail(hist))
 
 Serializable ==
-  LET Tx == {SelectSeq(history, LAMBDA x: x.proc = proc) : proc \in Proc}
-      perms == {f \in [1..Cardinality(Proc) -> Tx]
-                : \A tx \in Tx
-                  : \E proc \in 1..Cardinality(Proc) : f[proc] = tx}
+  LET Tx == {SelectSeq(history, LAMBDA x: x.proc = proc) : proc
+             \in {proc \in Proc : state[proc] = "Commit"}}
+      perms == {f \in [1..Cardinality(Tx) -> Tx]
+                    : \A tx \in Tx
+                      : \E proc \in 1..Cardinality(Tx) : f[proc] = tx}
    IN LET RECURSIVE concat(_, _, _, _)
           concat(f, n, size, acc) ==
             IF n > size THEN acc ELSE concat(f, n+1, size, acc \o f[n])
        IN \E perm \in perms
           : consistent([obj \in Object |-> 0],
-                       concat(perm, 1, Cardinality(Proc), <<>>))
-\*            /\ PrintT(<<history, concat(perm, 1, Cardinality(Proc), <<>>)>>)
+                       concat(perm, 1, Cardinality(Tx), <<>>))
+\*            /\ \/ Cardinality(Tx) < 2
+\*               \/ PrintT(<<history, concat(perm, 1, Cardinality(Tx), <<>>)>>)
 
-(***************************************************************************)
-(* Properties assert that if all transactions successfully commit then the *)
-(* history is serializable                                                 *)
-(***************************************************************************)
-Properties ==
-  []((\A proc \in Proc : state[proc] = "Commit") => Serializable)
+(****************************************************************************
+Properties assert that if some of transactions successfully commit then
+the history of the committed transactions is serializable
+****************************************************************************)
+Properties == []Serializable
 
 (***************************************************************************)
 (* EventuallyAllCommit is used to detect a deadlock                        *)
@@ -146,5 +147,5 @@ EventuallyAllCommit == <>[](\E proc \in Proc : state[proc] = "Commit")
 THEOREM Spec => []Invariants /\ Properties
 =============================================================================
 \* Modification History
-\* Last modified Sat Feb 17 13:23:53 JST 2018 by takayuki
+\* Last modified Sat Feb 17 13:58:11 JST 2018 by takayuki
 \* Created Sat Feb 17 10:34:44 JST 2018 by takayuki
