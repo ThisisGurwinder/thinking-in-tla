@@ -85,16 +85,6 @@ Commit(self, hd, tl) ==
   /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {self}]
   /\ UNCHANGED <<store>>
 
-Next == \E self \in Proc
-  : /\ transact[self] # <<>>
-    /\ LET hd == Head(transact[self])
-           tl == Tail(transact[self])
-       IN  \/ Read(self, hd, tl)
-           \/ Write(self, hd, tl)
-           \/ Commit(self, hd, tl)
-
-Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
-
 (***************************************************************************)
 (* Serializable asserts that, if some of transactions successfully commit, *)
 (* the history of the committed transactions is serializable.              *)
@@ -131,13 +121,19 @@ Serializable ==
 (* locks are consistent, and if some of transactions successfully commit,  *)
 (* the history of the committed transactions is serializable.              *)
 (***************************************************************************)
-Invariants ==
+TypeOK ==
   /\ \A proc \in Proc
      : state[proc] \in {"Init", "Running", "Commit"}
+
+LockOK ==
   /\ \A obj \in Object
      : Cardinality(WRITE[obj]) \in {0,1}
   /\ \A obj \in Object
      : Cardinality(WRITE[obj]) # 0 =>  READ[obj] \in SUBSET WRITE[obj]
+
+Invariants ==
+  /\ TypeOK
+  /\ LockOK
   /\ Serializable
 
 (***************************************************************************)
@@ -158,16 +154,30 @@ Waiting[self \in Proc, blocking \in SUBSET Proc] ==
 
 Deadlock[self \in Proc] == self \in Waiting[self, {}]
 
+Next ==
+  \/ \E self \in Proc
+     : /\ transact[self] # <<>>
+       /\ LET hd == Head(transact[self])
+              tl == Tail(transact[self])
+          IN  \/ Read(self, hd, tl)
+              \/ Write(self, hd, tl)
+              \/ Commit(self, hd, tl)
+  \/ /\ \A proc \in Proc : state[proc] \in {"Commit"} \/ Deadlock[proc]
+     /\ UNCHANGED vars
+
+Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
+
 (***************************************************************************)
-(* Properties assert that all transactions eventually commit or stop in    *)
-(* deadlock.                                                               *)
+(* A temporal property asserts that all transactions eventually commit or  *)
+(* stop in deadlock.                                                       *)
 (***************************************************************************)
-Properties ==
+EventuallyAllCommitOrDeadlock ==
   <>[](\A proc \in Proc : state[proc] \in {"Commit"} \/ Deadlock[proc])
 
+Properties == EventuallyAllCommitOrDeadlock
 
 THEOREM Spec => []Invariants /\ Properties
 =============================================================================
 \* Modification History
-\* Last modified Sat Feb 17 21:10:14 JST 2018 by takayuki
+\* Last modified Sat Feb 24 12:27:29 JST 2018 by takayuki
 \* Created Sat Feb 17 10:34:44 JST 2018 by takayuki

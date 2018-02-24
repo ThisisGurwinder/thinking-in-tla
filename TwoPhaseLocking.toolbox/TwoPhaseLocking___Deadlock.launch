@@ -21,7 +21,7 @@
 <intAttribute key="modelBehaviorSpecType" value="1"/>
 <stringAttribute key="modelBehaviorVars" value="state, store, history, transact, WRITE, READ"/>
 <stringAttribute key="modelComments" value=""/>
-<booleanAttribute key="modelCorrectnessCheckDeadlock" value="false"/>
+<booleanAttribute key="modelCorrectnessCheckDeadlock" value="true"/>
 <listAttribute key="modelCorrectnessInvariants">
 <listEntry value="1Invariants"/>
 </listAttribute>
@@ -31,8 +31,8 @@
 <stringAttribute key="modelExpressionEval" value=""/>
 <stringAttribute key="modelParameterActionConstraint" value=""/>
 <listAttribute key="modelParameterConstants">
-<listEntry value="Proc;;{A, B};1;1"/>
-<listEntry value="Object;;{X, Y};1;1"/>
+<listEntry value="Proc;;{A, B};1;0"/>
+<listEntry value="Object;;{X, Y};1;0"/>
 </listAttribute>
 <stringAttribute key="modelParameterContraint" value=""/>
 <listAttribute key="modelParameterDefinitions">
