@@ -19,19 +19,22 @@
 <stringAttribute key="modelBehaviorNext" value=""/>
 <stringAttribute key="modelBehaviorSpec" value="Spec"/>
 <intAttribute key="modelBehaviorSpecType" value="1"/>
-<stringAttribute key="modelBehaviorVars" value="state, commitTS, store, writeSet, ts, history, startTS, transact, WRITE"/>
+<stringAttribute key="modelBehaviorVars" value="store, writeSet, state, startTS, transact, history, commitTS, ts, WRITE"/>
 <stringAttribute key="modelComments" value=""/>
-<booleanAttribute key="modelCorrectnessCheckDeadlock" value="false"/>
+<booleanAttribute key="modelCorrectnessCheckDeadlock" value="true"/>
 <listAttribute key="modelCorrectnessInvariants">
-<listEntry value="1Invariants"/>
+<listEntry value="1TypeOK"/>
+<listEntry value="1LockOK"/>
+<listEntry value="0Serializable"/>
 </listAttribute>
 <listAttribute key="modelCorrectnessProperties">
-<listEntry value="1Properties"/>
+<listEntry value="1EventuallyAllCommitOrAbort"/>
+<listEntry value="1EventuallySomeCommit"/>
 </listAttribute>
 <stringAttribute key="modelExpressionEval" value=""/>
 <stringAttribute key="modelParameterActionConstraint" value=""/>
 <listAttribute key="modelParameterConstants">
-<listEntry value="Proc;;{A, B};1;1"/>
+<listEntry value="Proc;;{A, B};1;0"/>
 <listEntry value="Object;;{X, Y};1;0"/>
 </listAttribute>
 <stringAttribute key="modelParameterContraint" value=""/>

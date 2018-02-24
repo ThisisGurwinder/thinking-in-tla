@@ -120,24 +120,25 @@ Commit(self, hd, tl) ==
   /\ updateHistory(self, hd, tl, commitTS'[self])
   /\ UNCHANGED <<writeSet, startTS>>
 
-Next == \E self \in Proc
-  : /\ transact[self] # <<>>
-    /\ LET hd == Head(transact[self])
-           tl == Tail(transact[self])
-       IN  \/ Read(self, hd, tl)
-           \/ Write(self, hd, tl)
-           \/ Commit(self, hd, tl)
+Abort(self, victim) ==
+  /\ state[victim] \in {"Init", "Running"}
+  /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {victim}]
+  /\ state' = [state EXCEPT ![victim] = "Abort"]
+  /\ UNCHANGED <<transact, history, store, ts, writeSet, startTS, commitTS>>
 
-Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
-
-Invariants ==
+TypeOK ==
   /\ \A proc \in Proc
      : state[proc] \in {"Init", "Running", "Commit", "Abort"}
+LockOK ==
   /\ \A proc \in Proc
      : \A obj \in Object
        : Cardinality(writeSet[proc][obj]) \in {0, 1}
   /\ \A obj \in Object
      : Cardinality(WRITE[obj]) \in {0,1}
+
+Invariants ==
+  /\ TypeOK
+  /\ LockOK
 
 (***************************************************************************)
 (* Serializable asserts that, if some of transactions successfully commit, *)
@@ -184,17 +185,49 @@ Waiting[self \in Proc, blocking \in SUBSET Proc] ==
                    -> dependsOn(WRITE[hd.obj] \ {self})
                 [] OTHER -> {}
 
-Deadlock[self \in Proc] == self \in Waiting[self, {}]
+Blocking[self \in Proc] == Waiting[self, {}]
+Deadlock[self \in Proc] == self \in Blocking[self]
+
+Resolve(self) ==
+  LET blocking == Blocking[self]
+   IN  /\ (* <=> Deadlock[self] *)
+           self \in blocking
+       /\ (* abort a single transaction in deadlock randomly *)
+          \E victim \in blocking : Abort(self, victim)
+
+Next ==
+  \/ \E self \in Proc
+     : /\ transact[self] # <<>>
+       /\ LET hd == Head(transact[self])
+              tl == Tail(transact[self])
+          IN  \/ Read(self, hd, tl)
+              \/ Write(self, hd, tl)
+              \/ Commit(self, hd, tl)
+              \/ Resolve(self)
+  \/ /\ \A proc \in Proc : state[proc] \in {"Commit", "Abort"}
+     /\ UNCHANGED vars
+
+Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
 
 (***************************************************************************)
-(* Properties assert that all transactions eventually commit, abort or     *)
-(* stop in a deadlock.                                                     *)
+(* A temporal property asserts that all transactions eventually commit or  *)
+(* abort without deadlock.                                                 *)
 (***************************************************************************)
-Properties == <>[](\A proc \in Proc
-                   : state[proc] \in {"Commit", "Abort"} \/ Deadlock[proc])
+EventuallyAllCommitOrAbort ==
+   <>[](\A proc \in Proc : state[proc] \in {"Commit", "Abort"})
+
+(***************************************************************************)
+(* A temporal property asserts that some transactions eventually commit.   *)
+(***************************************************************************)
+EventuallySomeCommit ==
+   <>[](\E proc \in Proc : state[proc] = "Commit")
+
+Properties ==
+  /\ EventuallyAllCommitOrAbort
+  /\ EventuallySomeCommit
 
 THEOREM Spec => []Invariants /\ Properties
 =============================================================================
 \* Modification History
-\* Last modified Sat Feb 17 21:16:52 JST 2018 by takayuki
+\* Last modified Sat Feb 24 12:38:42 JST 2018 by takayuki
 \* Created Mon Feb 12 21:27:20 JST 2018 by takayuki
