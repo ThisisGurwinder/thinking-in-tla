@@ -3,11 +3,20 @@ EXTENDS FiniteSets, Naturals, Sequences, TLC
 
 CONSTANT Proc, Object
 
+(***************************************************************************)
+(* Proc is a set of transaction IDs.  Note that transaction #0 is a        *)
+(* hypothetical transaction that wrote all initial values in store.        *)
+(***************************************************************************)
+ASSUME
+  /\ Proc \subseteq Nat \ {0}
+  /\ Proc \cap Object = {}
+
 VARIABLE
   transact,
   history,
   state,
   store,
+  writeSet,
   READ,        (* read lock  *)
   WRITE        (* write lock *)
 
@@ -16,6 +25,7 @@ vars == <<
   history,
   state,
   store,
+  writeSet,
   READ,
   WRITE
 >>
@@ -28,13 +38,27 @@ Transaction ==
       seq(S) == UNION {[1..n -> S] : n \in Nat}
   IN  {Append(op, [f |-> "Commit"]) : op \in seq(Op)}
 
+initValues == [obj \in Object |-> [proc |-> 0]]
+
 Init ==
   /\ \E tx \in [Proc -> Transaction] : transact = tx
   /\ history = <<>>
   /\ state = [proc \in Proc |-> "Init"]
-  /\ store = [obj \in Object |-> 0]
+  /\ store = initValues
+  /\ writeSet = [proc \in Proc |-> [obj \in Object |-> {}]]
   /\ READ = [obj \in Object |-> {}]
   /\ WRITE = [obj \in Object |-> {}]
+
+bufferWrite(self, obj, val) ==
+  writeSet' = [writeSet EXCEPT ![self][obj] = {val}]
+
+ANY(S) == CHOOSE s \in S : TRUE
+
+bufferRead(self, obj) ==
+  IF writeSet[self][obj] # {} THEN ANY(writeSet[self][obj]) ELSE store[obj]
+
+bufferFlush(self) ==
+  store' = [obj \in Object |-> bufferRead(self, obj)]
 
 updateHistory(self, hd, tl, val) ==
   /\ history' = Append(history, [proc |-> self, op |-> hd, val |-> val])
@@ -45,21 +69,21 @@ ReadLongDurationLock(self, hd, tl) ==
   /\ hd.f = "Read"
   /\ WRITE[hd.obj] \in {{}, {self}}
   /\ READ' = [READ EXCEPT ![hd.obj] = READ[hd.obj] \cup {self}]
-  /\ updateHistory(self, hd, tl, store[hd.obj])
+  /\ updateHistory(self, hd, tl, bufferRead(self, hd.obj))
   /\ IF state[self] = "Init"
      THEN /\ state' = [state EXCEPT ![self] = "Running"]
-          /\ UNCHANGED <<store, WRITE>>
-     ELSE UNCHANGED <<state, store, WRITE>>
+          /\ UNCHANGED <<store, writeSet, WRITE>>
+     ELSE UNCHANGED <<state, store, writeSet, WRITE>>
 
 ReadShortDurationLock(self, hd, tl) ==
   /\ state[self] \in {"Init", "Running"}
   /\ hd.f = "Read"
   /\ WRITE[hd.obj] \in {{}, {self}}
-  /\ updateHistory(self, hd, tl, store[hd.obj])
+  /\ updateHistory(self, hd, tl, bufferRead(self, hd.obj))
   /\ IF state[self] = "Init"
      THEN /\ state' = [state EXCEPT ![self] = "Running"]
-          /\ UNCHANGED <<store, READ, WRITE>>
-     ELSE UNCHANGED <<state, store, READ, WRITE>>
+          /\ UNCHANGED <<store, writeSet, READ, WRITE>>
+     ELSE UNCHANGED <<state, store, writeSet, READ, WRITE>>
 
 Read(self, hd, tl) == ReadLongDurationLock(self, hd, tl)
 
@@ -69,39 +93,52 @@ Write(self, hd, tl) ==
   /\ WRITE[hd.obj] \in {{}, {self}}
   /\ WRITE' = [WRITE EXCEPT ![hd.obj] = WRITE[hd.obj] \cup {self}]
   /\ READ[hd.obj] \in SUBSET WRITE'[hd.obj]
-  /\ store' = [store EXCEPT ![hd.obj] = store[hd.obj]+1]
-  /\ updateHistory(self, hd, tl, store[hd.obj]+1)
+  /\ bufferWrite(self, hd.obj, [proc |-> self])
+  /\ updateHistory(self, hd, tl, [proc |-> self])
   /\ IF state[self] = "Init"
      THEN /\ state' = [state EXCEPT ![self] = "Running"]
-          /\ UNCHANGED <<READ>>
-     ELSE UNCHANGED <<state, READ>>
+          /\ UNCHANGED <<store, READ>>
+     ELSE UNCHANGED <<state, store, READ>>
 
 Commit(self, hd, tl) ==
   /\ state[self] \in {"Init", "Running"}
   /\ hd.f = "Commit"
-  /\ updateHistory(self, hd, tl, 0)
+  /\ updateHistory(self, hd, tl, [proc |-> self])
+  /\ bufferFlush(self)
   /\ state' = [state EXCEPT ![self] = "Commit"]
   /\ READ' = [obj \in Object |-> READ[obj] \ {self}]
   /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {self}]
-  /\ UNCHANGED <<store>>
+  /\ UNCHANGED <<writeSet>>
+
+Abort(self, victim) ==
+  /\ state[victim] \in {"Init", "Running"}
+  /\ history' = Append(history, [proc |-> victim, op |-> [f |-> "Abort"]])
+  /\ state' = [state EXCEPT ![victim] = "Abort"]
+  /\ READ' = [obj \in Object |-> READ[obj] \ {victim}]
+  /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {victim}]
+  /\ UNCHANGED <<transact, store, writeSet>>
 
 (***************************************************************************)
-(* Serializable asserts that, if some of transactions successfully commit, *)
-(* the history of the committed transactions is serializable.              *)
+(* ViewSerializable asserts that, if some of transactions successfully     *)
+(* commit, the history of the committed transactions is view-serializable. *)
 (***************************************************************************)
-RECURSIVE consistent(_, _)
-consistent(s, hist) ==
+RECURSIVE viewEq(_, _)
+viewEq(s, hist) ==
   IF hist = <<>>
-  THEN TRUE
+  THEN (********************************************************************)
+       (* transaction updates store on commit, so store has only writes    *)
+       (* successfully committed.                                          *)
+       (********************************************************************)
+       \A obj \in Object : s[obj].proc = store[obj].proc
   ELSE LET hd == Head(hist)
         IN CASE hd.op.f = "Read"
-                -> s[hd.op.obj] = hd.val /\ consistent(s, Tail(hist))
+                -> s[hd.op.obj] = hd.val /\ viewEq(s, Tail(hist))
              [] hd.op.f = "Write"
-                -> consistent([s EXCEPT ![hd.op.obj] = hd.val], Tail(hist))
+                -> viewEq([s EXCEPT ![hd.op.obj] = hd.val], Tail(hist))
              [] OTHER
-                -> consistent(s, Tail(hist))
+                -> viewEq(s, Tail(hist))
 
-Serializable ==
+ViewSerializable ==
   LET Tx == {SelectSeq(history, LAMBDA x: x.proc = proc) : proc
              \in {proc \in Proc : state[proc] = "Commit"}}
       perms == {f \in [1..Cardinality(Tx) -> Tx]
@@ -111,8 +148,7 @@ Serializable ==
           concat(f, n, size, acc) ==
             IF n > size THEN acc ELSE concat(f, n+1, size, acc \o f[n])
        IN \E perm \in perms
-          : consistent([obj \in Object |-> 0],
-                       concat(perm, 1, Cardinality(Tx), <<>>))
+          : viewEq(initValues, concat(perm, 1, Cardinality(Tx), <<>>))
 \*            /\ \/ Cardinality(Tx) < 2
 \*               \/ PrintT(<<history, concat(perm, 1, Cardinality(Tx), <<>>)>>)
 
@@ -123,7 +159,7 @@ Serializable ==
 (***************************************************************************)
 TypeOK ==
   /\ \A proc \in Proc
-     : state[proc] \in {"Init", "Running", "Commit"}
+     : state[proc] \in {"Init", "Running", "Commit", "Abort"}
 
 LockOK ==
   /\ \A obj \in Object
@@ -134,15 +170,15 @@ LockOK ==
 Invariants ==
   /\ TypeOK
   /\ LockOK
-  /\ Serializable
+  /\ ViewSerializable
 
 (***************************************************************************)
 (* Deadlock asserts that a process is stopping in a deadlock               *)
 (***************************************************************************)
-Waiting[self \in Proc, blocking \in SUBSET Proc] ==
+WaitingFor[self \in Proc, blocking \in SUBSET Proc] ==
   IF self \in blocking \/ state[self] # "Running"
   THEN {}
-  ELSE LET grandChildren(proc) == Waiting[proc, blocking \cup {self}]
+  ELSE LET grandChildren(proc) == WaitingFor[proc, blocking \cup {self}]
        IN LET dependsOn(children) ==
                 children \cup UNION {grandChildren(proc) : proc \in children}
               hd == Head(transact[self])
@@ -152,7 +188,14 @@ Waiting[self \in Proc, blocking \in SUBSET Proc] ==
                    -> dependsOn((READ[hd.obj] \cup WRITE[hd.obj]) \ {self})
                 [] OTHER -> {}
 
-Deadlock[self \in Proc] == self \in Waiting[self, {}]
+Deadlock[self \in Proc] == self \in WaitingFor[self, {}]
+
+Resolve(self) ==
+  LET waitingFor == WaitingFor[self, {}]
+   IN  /\ (* <=> Deadlock[self] *)
+           self \in waitingFor
+       /\ (* abort a single transaction in deadlock randomly *)
+          \E victim \in waitingFor : Abort(self, victim)
 
 Next ==
   \/ \E self \in Proc
@@ -162,22 +205,23 @@ Next ==
           IN  \/ Read(self, hd, tl)
               \/ Write(self, hd, tl)
               \/ Commit(self, hd, tl)
-  \/ /\ \A proc \in Proc : state[proc] \in {"Commit"} \/ Deadlock[proc]
+              \/ Resolve(self)
+  \/ /\ \A proc \in Proc : state[proc] \in {"Commit", "Abort"}
      /\ UNCHANGED vars
 
 Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
 
 (***************************************************************************)
 (* A temporal property asserts that all transactions eventually commit or  *)
-(* stop in deadlock.                                                       *)
+(* abort.                                                                  *)
 (***************************************************************************)
-EventuallyAllCommitOrDeadlock ==
-  <>[](\A proc \in Proc : state[proc] \in {"Commit"} \/ Deadlock[proc])
+EventuallyAllCommitOrAbort ==
+  <>[](\A proc \in Proc : state[proc] \in {"Commit", "Abort"})
 
-Properties == EventuallyAllCommitOrDeadlock
+Properties == EventuallyAllCommitOrAbort
 
 THEOREM Spec => []Invariants /\ Properties
 =============================================================================
 \* Modification History
-\* Last modified Sat Feb 24 12:27:29 JST 2018 by takayuki
+\* Last modified Sat Mar 03 14:33:25 JST 2018 by takayuki
 \* Created Sat Feb 17 10:34:44 JST 2018 by takayuki

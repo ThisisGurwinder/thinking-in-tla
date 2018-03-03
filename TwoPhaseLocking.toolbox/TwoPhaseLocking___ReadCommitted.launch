@@ -6,7 +6,7 @@
 <intAttribute key="dfidDepth" value="100"/>
 <booleanAttribute key="dfidMode" value="false"/>
 <intAttribute key="distributedFPSetCount" value="0"/>
-<stringAttribute key="distributedNetworkInterface" value="192.168.100.3"/>
+<stringAttribute key="distributedNetworkInterface" value="192.168.100.7"/>
 <intAttribute key="distributedNodesCount" value="1"/>
 <stringAttribute key="distributedTLC" value="off"/>
 <stringAttribute key="distributedTLCVMArgs" value=""/>
@@ -19,21 +19,21 @@
 <stringAttribute key="modelBehaviorNext" value=""/>
 <stringAttribute key="modelBehaviorSpec" value="Spec"/>
 <intAttribute key="modelBehaviorSpecType" value="1"/>
-<stringAttribute key="modelBehaviorVars" value="state, store, history, transact, WRITE, READ"/>
+<stringAttribute key="modelBehaviorVars" value="store, writeSet, state, transact, history, READ, WRITE"/>
 <stringAttribute key="modelComments" value=""/>
 <booleanAttribute key="modelCorrectnessCheckDeadlock" value="true"/>
 <listAttribute key="modelCorrectnessInvariants">
 <listEntry value="1TypeOK"/>
 <listEntry value="1LockOK"/>
-<listEntry value="0Serializable"/>
+<listEntry value="1ViewSerializable"/>
 </listAttribute>
 <listAttribute key="modelCorrectnessProperties">
-<listEntry value="1EventuallyAllCommitOrDeadlock"/>
+<listEntry value="1EventuallyAllCommitOrAbort"/>
 </listAttribute>
 <stringAttribute key="modelExpressionEval" value=""/>
 <stringAttribute key="modelParameterActionConstraint" value=""/>
 <listAttribute key="modelParameterConstants">
-<listEntry value="Proc;;{A, B};1;0"/>
+<listEntry value="Proc;;{1, 2};0;0"/>
 <listEntry value="Object;;{X, Y};1;0"/>
 </listAttribute>
 <stringAttribute key="modelParameterContraint" value=""/>
