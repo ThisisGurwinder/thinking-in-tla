@@ -1,7 +1,18 @@
 ------------------------- MODULE SnapshotIsolation -------------------------
 EXTENDS FiniteSets, Naturals, Sequences, TLC
 
-CONSTANT Proc, Object
+CONSTANT Proc, Object, MAXTXOPS
+
+(***************************************************************************)
+(* Proc is a set of non-zero process IDs, i.e.  TXIDs.  Note that TXID #0  *)
+(* is a hypothetical transaction that wrote all initial values in store.   *)
+(* Object represents a set of objects in database.  MAXTXOPS is the max    *)
+(* number of read and write operations in a transaction.                   *)
+(***************************************************************************)
+ASSUME
+  /\ Proc \subseteq Nat \ {0}
+  /\ Proc \cap Object = {}
+  /\ MAXTXOPS \in Nat \ {0}
 
 VARIABLE
   transact,
@@ -26,19 +37,25 @@ vars == <<
   WRITE
 >>
 
+ANY(S) == CHOOSE s \in S : TRUE
+
 (***************************************************************************)
 (* Transaction is a set of all possible transactions                       *)
 (***************************************************************************)
 Transact ==
   LET Op == [f : {"Read", "Write"}, obj : Object]
-      seq(S) == UNION {[1..n -> S] : n \in Nat}
+      seq(S) == UNION {[1..n -> S] : n \in 1..MAXTXOPS}
   IN  {Append(op, [f |-> "Commit"]) : op \in seq(Op)}
+
+Value == [proc : {0} \cup Proc]
+Version == [ver : Nat, val : Value]
+InitValues == [obj \in Object |-> {[ver |-> 0, val |-> [proc |-> 0]]}]
 
 Init ==
   /\ \E tx \in [Proc -> Transact] : transact = tx
   /\ history = <<>>
   /\ state = [proc \in Proc |-> "Init"]
-  /\ store = [obj \in Object |-> {[ver |-> 0, val |-> 0]}]
+  /\ store = InitValues
   /\ ts = 0
   /\ writeSet = [proc \in Proc |-> [obj \in Object |-> {}]]
   /\ startTS = [proc \in Proc |-> 0]
@@ -57,7 +74,7 @@ snapshotWrite(self, obj, val) ==
 (***************************************************************************)
 snapshotRead(self, obj, ver) ==
   IF writeSet[self][obj] # {}
-  THEN CHOOSE v \in writeSet[self][obj] : TRUE
+  THEN ANY(writeSet[self][obj])
   ELSE LET h == {i \in store[obj] : i.ver <= ver}
            s == CHOOSE i \in h : \A j \in h: i.ver >= j.ver
         IN s.val
@@ -70,12 +87,20 @@ snapshotCommit(self, ver) ==
     IF writeSet[self][obj] # {}
     THEN store[obj] \cup
          {[ver |-> commitTS'[self],
-           val |-> CHOOSE v \in writeSet[self][obj] : TRUE]}
+           val |-> ANY(writeSet[self][obj])]}
     ELSE store[obj]]
 
-updateHistory(self, hd, tl, val) ==
+
+recordHistoryValue(self, hd, tl, val) ==
   /\ history' = Append(history, [proc |-> self, op |-> hd, val |-> val])
   /\ transact' = [transact EXCEPT ![self] = tl]
+
+recordHistory(self, hd, tl) ==
+  /\ history' = Append(history, [proc |-> self, op |-> hd])
+  /\ transact' = [transact EXCEPT ![self] = tl]
+
+insertHistory(self, op) ==
+  /\ history' = Append(history, [proc |-> self, op |-> op])
 
 Read(self, hd, tl) ==
   /\ state[self] \in {"Init", "Running"}
@@ -85,7 +110,7 @@ Read(self, hd, tl) ==
           /\ state' = [state EXCEPT ![self] = "Running"]
      ELSE UNCHANGED <<state, startTS>>
   /\ LET val == snapshotRead(self, hd.obj, startTS'[self])
-     IN  updateHistory(self, hd, tl, val)
+     IN  recordHistoryValue(self, hd, tl, val)
   /\ UNCHANGED <<store, ts, writeSet, commitTS, WRITE>>
 
 Write(self, hd, tl) ==
@@ -103,9 +128,9 @@ Write(self, hd, tl) ==
           THEN state' = [state EXCEPT ![self] = "Running"]
           ELSE UNCHANGED  <<state>>
   /\ IF state'[self] = "Running"
-     THEN LET val == snapshotRead(self, hd.obj, startTS'[self])
-          IN  /\ snapshotWrite(self, hd.obj, val+1)
-              /\ updateHistory(self, hd, tl, val+1)
+     THEN LET val == [proc |-> self]
+          IN  /\ snapshotWrite(self, hd.obj, val)
+              /\ recordHistoryValue(self, hd, tl, val)
      ELSE UNCHANGED <<transact, history, writeSet>>
   /\ UNCHANGED <<store, ts, commitTS>>
 
@@ -117,22 +142,33 @@ Commit(self, hd, tl) ==
   /\ commitTS' = [commitTS EXCEPT ![self] = ts']
   /\ state' = [state EXCEPT ![self] = "Commit"]
   /\ snapshotCommit(self, commitTS'[self])
-  /\ updateHistory(self, hd, tl, commitTS'[self])
+  /\ recordHistory(self, hd, tl)
   /\ UNCHANGED <<writeSet, startTS>>
 
-Abort(self, victim) ==
+Abort(self, victim, reason) ==
   /\ state[victim] \in {"Init", "Running"}
   /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {victim}]
   /\ state' = [state EXCEPT ![victim] = "Abort"]
-  /\ UNCHANGED <<transact, history, store, ts, writeSet, startTS, commitTS>>
+  /\ insertHistory(victim, [f |-> "Abort"])
+  /\ UNCHANGED <<transact, store, ts, writeSet, startTS, commitTS>>
 
 TypeOK ==
+  /\ \A idx \in DOMAIN history
+     : LET e == history[idx]
+       IN  /\ e.proc \in Proc
+           /\ \/ /\ e.op.f \in {"Read", "Write"}
+                 /\ e.op.obj \in Object
+                 /\ e.val \in Value
+              \/ e.op.f \in {"Commit", "Abort"}
   /\ \A proc \in Proc
      : state[proc] \in {"Init", "Running", "Commit", "Abort"}
-LockOK ==
+  /\ \A obj \in Object
+     : \A t \in store[obj] : t \in Version
   /\ \A proc \in Proc
      : \A obj \in Object
        : Cardinality(writeSet[proc][obj]) \in {0, 1}
+
+LockOK ==
   /\ \A obj \in Object
      : Cardinality(WRITE[obj]) \in {0,1}
 
@@ -141,22 +177,29 @@ Invariants ==
   /\ LockOK
 
 (***************************************************************************)
-(* Serializable asserts that, if some of transactions successfully commit, *)
-(* the history of the committed transactions is serializable.              *)
+(* ViewSerializable asserts that, if some of transactions successfully     *)
+(* commit, the history of the committed transactions is view-serializable. *)
 (***************************************************************************)
-RECURSIVE consistent(_, _)
-consistent(s, hist) ==
+RECURSIVE viewEq(_, _)
+viewEq(s, hist) ==
   IF hist = <<>>
-  THEN TRUE
+  THEN (********************************************************************)
+       (* transaction updates store on commit, so store has only writes    *)
+       (* successfully committed.                                          *)
+       (********************************************************************)
+       \A obj \in Object
+       : \E i \in store[obj]
+         : \A j \in store[obj]
+           : i.ver >= j.ver /\ s[obj].proc = i.val.proc
   ELSE LET hd == Head(hist)
         IN CASE hd.op.f = "Read"
-                -> s[hd.op.obj] = hd.val /\ consistent(s, Tail(hist))
+                -> s[hd.op.obj] = hd.val /\ viewEq(s, Tail(hist))
              [] hd.op.f = "Write"
-                -> consistent([s EXCEPT ![hd.op.obj] = hd.val], Tail(hist))
+                -> viewEq([s EXCEPT ![hd.op.obj] = hd.val], Tail(hist))
              [] OTHER
-                -> consistent(s, Tail(hist))
+                -> viewEq(s, Tail(hist))
 
-Serializable ==
+ViewSerializable ==
   LET Tx == {SelectSeq(history, LAMBDA x: x.proc = proc) : proc
              \in {proc \in Proc : state[proc] = "Commit"}}
       perms == {f \in [1..Cardinality(Tx) -> Tx]
@@ -166,18 +209,18 @@ Serializable ==
           concat(f, n, size, acc) ==
             IF n > size THEN acc ELSE concat(f, n+1, size, acc \o f[n])
        IN \E perm \in perms
-          : consistent([obj \in Object |-> 0],
-                       concat(perm, 1, Cardinality(Tx), <<>>))
+          : viewEq([obj \in Object |-> [proc |-> 0]],
+                   concat(perm, 1, Cardinality(Tx), <<>>))
 \*            /\ \/ Cardinality(Tx) < 2
 \*               \/ PrintT(<<history, concat(perm, 1, Cardinality(Tx), <<>>)>>)
 
 (***************************************************************************)
 (* Deadlock asserts that a process is stopping in a deadlock               *)
 (***************************************************************************)
-Waiting[self \in Proc, blocking \in SUBSET Proc] ==
+WaitingFor[self \in Proc, blocking \in SUBSET Proc] ==
   IF self \in blocking \/ state[self] # "Running"
   THEN {}
-  ELSE LET grandChildren(proc) == Waiting[proc, blocking \cup {self}]
+  ELSE LET grandChildren(proc) == WaitingFor[proc, blocking \cup {self}]
        IN LET dependsOn(children) ==
                 children \cup UNION {grandChildren(proc) : proc \in children}
               hd == Head(transact[self])
@@ -185,25 +228,25 @@ Waiting[self \in Proc, blocking \in SUBSET Proc] ==
                    -> dependsOn(WRITE[hd.obj] \ {self})
                 [] OTHER -> {}
 
-Blocking[self \in Proc] == Waiting[self, {}]
-Deadlock[self \in Proc] == self \in Blocking[self]
+Deadlock[self \in Proc] == self \in WaitingFor[self, {}]
 
 Resolve(self) ==
-  LET blocking == Blocking[self]
+  LET waitingFor == WaitingFor[self, {}]
    IN  /\ (* <=> Deadlock[self] *)
-           self \in blocking
+           self \in waitingFor
        /\ (* abort a single transaction in deadlock randomly *)
-          \E victim \in blocking : Abort(self, victim)
+          \E victim \in waitingFor : Abort(self, victim, "deadlock")
 
 Next ==
   \/ \E self \in Proc
-     : /\ transact[self] # <<>>
-       /\ LET hd == Head(transact[self])
-              tl == Tail(transact[self])
-          IN  \/ Read(self, hd, tl)
-              \/ Write(self, hd, tl)
-              \/ Commit(self, hd, tl)
-              \/ Resolve(self)
+     : \/ /\ transact[self] # <<>>
+          /\ \/ LET hd == Head(transact[self])
+                    tl == Tail(transact[self])
+                IN  \/ Read(self, hd, tl)
+                    \/ Write(self, hd, tl)
+                    \/ Commit(self, hd, tl)
+                    \/ Resolve(self)
+       \/ Abort(self, self, "voluntary")
   \/ /\ \A proc \in Proc : state[proc] \in {"Commit", "Abort"}
      /\ UNCHANGED vars
 
@@ -224,10 +267,9 @@ EventuallySomeCommit ==
 
 Properties ==
   /\ EventuallyAllCommitOrAbort
-  /\ EventuallySomeCommit
 
 THEOREM Spec => []Invariants /\ Properties
 =============================================================================
 \* Modification History
-\* Last modified Sat Feb 24 12:38:42 JST 2018 by takayuki
+\* Last modified Sun Mar 04 11:41:27 JST 2018 by takayuki
 \* Created Mon Feb 12 21:27:20 JST 2018 by takayuki

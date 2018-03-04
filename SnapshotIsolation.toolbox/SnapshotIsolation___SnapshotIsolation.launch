@@ -6,7 +6,7 @@
 <intAttribute key="dfidDepth" value="100"/>
 <booleanAttribute key="dfidMode" value="false"/>
 <intAttribute key="distributedFPSetCount" value="0"/>
-<stringAttribute key="distributedNetworkInterface" value="192.168.100.3"/>
+<stringAttribute key="distributedNetworkInterface" value="192.168.100.7"/>
 <intAttribute key="distributedNodesCount" value="1"/>
 <stringAttribute key="distributedTLC" value="off"/>
 <stringAttribute key="distributedTLCVMArgs" value=""/>
@@ -25,22 +25,21 @@
 <listAttribute key="modelCorrectnessInvariants">
 <listEntry value="1TypeOK"/>
 <listEntry value="1LockOK"/>
-<listEntry value="0Serializable"/>
+<listEntry value="0ViewSerializable"/>
 </listAttribute>
 <listAttribute key="modelCorrectnessProperties">
 <listEntry value="1EventuallyAllCommitOrAbort"/>
-<listEntry value="1EventuallySomeCommit"/>
+<listEntry value="0EventuallySomeCommit"/>
 </listAttribute>
 <stringAttribute key="modelExpressionEval" value=""/>
 <stringAttribute key="modelParameterActionConstraint" value=""/>
 <listAttribute key="modelParameterConstants">
-<listEntry value="Proc;;{A, B};1;0"/>
+<listEntry value="Proc;;{1, 2};0;0"/>
 <listEntry value="Object;;{X, Y};1;0"/>
+<listEntry value="MAXTXOPS;;2;0;0"/>
 </listAttribute>
 <stringAttribute key="modelParameterContraint" value=""/>
-<listAttribute key="modelParameterDefinitions">
-<listEntry value="Nat;;1..2;0;0"/>
-</listAttribute>
+<listAttribute key="modelParameterDefinitions"/>
 <stringAttribute key="modelParameterModelValues" value="{}"/>
 <stringAttribute key="modelParameterNewDefinitions" value=""/>
 <intAttribute key="numberOfWorkers" value="2"/>
