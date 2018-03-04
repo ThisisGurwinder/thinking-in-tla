@@ -4,20 +4,34 @@ EXTENDS FiniteSets, Naturals, Sequences, TLC
 (***************************************************************************)
 (* This module specifies Serializable Snapshot Isolation (SSI) as well as  *)
 (* Snapshot Isolation (SI).  You can use a boolean constant SERIALIZE to   *)
-(* enable and disable the extention to SI so as to accept only             *)
-(* serializable history.                                                   *)
+(* enable and disable the extention SSI introduces over SI.                *)
 (***************************************************************************)
-CONSTANTS Proc, Object, SERIALIZE
+CONSTANTS Proc, Object, MAXTXOPS, SERIALIZE
+
+(***************************************************************************)
+(* Proc is a set of non-zero process IDs, i.e.  TXIDs.  Note that TXID #0  *)
+(* is a hypothetical transaction that wrote all initial values in store.   *)
+(* Object represents a set of objects in database.  MAXTXOPS is the max    *)
+(* number of read and write operations in a transaction.                   *)
+(***************************************************************************)
+ASSUME
+  /\ Proc \subseteq Nat \ {0}
+  /\ Proc \cap Object = {}
+  /\ MAXTXOPS \in Nat \ {0}
+
+ANY(S) == CHOOSE s \in S : TRUE
 
 (***************************************************************************)
 (* Transaction is a set of all possible transactions                       *)
 (***************************************************************************)
 Transact ==
   LET Op == [f : {"Read", "Write"}, obj : Object]
-      seq(S) == UNION {[1..n -> S] : n \in Nat}
+      seq(S) == UNION {[1..n -> S] : n \in 1..MAXTXOPS}
   IN  {Append(op, [f |-> "Commit"]) : op \in seq(Op)}
 
-ANY(S) == CHOOSE s \in S : TRUE
+Value == [proc : {0} \cup Proc]
+Version == [ver : Nat, val : Value]
+InitValues == [obj \in Object |-> {[ver |-> 0, val |-> [proc |-> 0]]}]
 
 (***************************************************************************
 --fair algorithm SerializableSnapshotIsolation {
@@ -25,8 +39,9 @@ ANY(S) == CHOOSE s \in S : TRUE
     transact \in [Proc -> Transact];
     state = [proc \in Proc |-> "Init"];
     history = <<>>;
-    store = [obj \in Object |-> {[ver |-> 0, val |-> 0]}];
+    store = InitValues;
     ts = 0;
+    writeSet = [proc \in Proc |-> [obj \in Object |-> {}]];
     startTS = [proc \in Proc |-> 0];
     commitTS = [proc \in Proc |-> 0];
     inConflict = [proc \in Proc |-> FALSE];
@@ -37,53 +52,81 @@ ANY(S) == CHOOSE s \in S : TRUE
     Hd[proc \in Proc] == Head(transact[proc])
     Tl[proc \in Proc] == Tail(transact[proc])
 
-    (***********************************************************************)
-    (* Serializable asserts that, if some of transactions successfully     *)
-    (* commit, the history of the committed transactions is serializable.  *)
-    (***********************************************************************)
-    RECURSIVE consistent(_, _)
-    consistent(s, hist) ==
-      IF hist = <<>>
-      THEN TRUE
-      ELSE LET hd == Head(hist)
-               tl == Tail(hist)
-           IN  CASE hd.op.f = "Read"
-                    -> s[hd.op.obj] = hd.val /\ consistent(s, tl)
-                 [] hd.op.f = "Write"
-                    -> consistent([s EXCEPT ![hd.op.obj] = hd.val], tl)
-                 [] OTHER
-                    -> consistent(s, Tail(hist))
+    TypeOK ==
+      /\ \A idx \in DOMAIN history
+         : LET e == history[idx]
+           IN  /\ e.proc \in Proc
+               /\ \/ /\ e.op.f \in {"Read", "Write"}
+                     /\ e.op.obj \in Object
+                     /\ e.val \in Value
+                  \/ e.op.f \in {"Commit", "Abort"}
+      /\ \A proc \in Proc
+         : state[proc] \in {"Init", "Running", "Commit", "Abort"}
+      /\ \A obj \in Object
+         : \A t \in store[obj] : t \in Version
+      /\ \A proc \in Proc
+         : \A obj \in Object
+           : Cardinality(writeSet[proc][obj]) \in {0, 1}
 
-    Serializable ==
+    LockOK ==
+      /\ \A obj \in Object
+         : Cardinality(WRITE[obj]) \in {0,1}
+
+    (***********************************************************************)
+    (* ViewSerializable asserts that, if some of transactions successfully *)
+    (* commit, the history of the committed transactions is                *)
+    (* view-serializable.                                                  *)
+    (***********************************************************************)
+    RECURSIVE viewEq(_, _)
+    viewEq(s, hist) ==
+      IF hist = <<>>
+      THEN  \A obj \in Object
+            : \E i \in store[obj]
+              : \A j \in store[obj]
+                : i.ver >= j.ver /\ s[obj].proc = i.val.proc
+      ELSE LET hd == Head(hist)
+           IN  CASE hd.op.f = "Read"
+                    -> s[hd.op.obj] = hd.val /\ viewEq(s, Tail(hist))
+                 [] hd.op.f = "Write"
+                    -> viewEq([s EXCEPT ![hd.op.obj] = hd.val], Tail(hist))
+                 [] OTHER
+                    -> viewEq(s, Tail(hist))
+
+    ViewSerializable ==
       LET Tx == {SelectSeq(history, LAMBDA x: x.proc = proc) : proc
                  \in {proc \in Proc : state[proc] = "Commit"}}
           perms == {f \in [1..Cardinality(Tx) -> Tx]
-                        : \A tx \in Tx
-                          : \E proc \in 1..Cardinality(Tx) : f[proc] = tx}
+                    : \A tx \in Tx
+                      : \E idx \in 1..Cardinality(Tx) : f[idx] = tx}
        IN LET RECURSIVE concat(_, _, _, _)
               concat(f, n, size, acc) ==
                 IF n > size THEN acc ELSE concat(f, n+1, size, acc \o f[n])
-           IN \E perm \in perms
-              : LET serial == concat(perm, 1, Cardinality(Tx), <<>>)
-                IN  consistent([obj \in Object |-> 0], serial)
-\*                    /\ \/ Cardinality(Tx) < 2
-\*                       \/ PrintT(<<history, serial>>)
+          IN  \E perm \in perms
+              : viewEq([obj \in Object |-> [proc |-> 0]],
+                       concat(perm, 1, Cardinality(Tx), <<>>))
+\*            /\ \/ Cardinality(Tx) < 2
+\*               \/ PrintT(<<history, concat(perm, 1, Cardinality(Tx), <<>>)>>)
+
+    Invariants ==
+      /\ TypeOK
+      /\ LockOK
+      /\ ViewSerializable
 
     (***********************************************************************)
     (* Deadlock asserts that a process is stopping in a deadlock           *)
     (***********************************************************************)
-    Waiting[self \in Proc, blocking \in SUBSET Proc] ==
+    WaitingFor[self \in Proc, blocking \in SUBSET Proc] ==
       IF self \in blocking \/ state[self] # "Running"
       THEN {}
-      ELSE LET grandChildren(p) == Waiting[p, blocking \cup {self}]
+      ELSE LET grandChildren(proc) == WaitingFor[proc, blocking \cup {self}]
            IN LET dependsOn(children) ==
-                    children \cup UNION {grandChildren(p) : p \in children}
+                    children \cup UNION {grandChildren(proc) : proc \in children}
                   hd == Head(transact[self])
               IN  CASE hd.f = "Write"
                        -> dependsOn(WRITE[hd.obj] \ {self})
                     [] OTHER -> {}
-    Blocking[self \in Proc] == Waiting[self, {}]
-    Deadlock[self \in Proc] == self \in Blocking[self]
+
+    Deadlock[self \in Proc] == self \in WaitingFor[self, {}]
 
     (***********************************************************************)
     (* A temporal property asserts that all transactions eventually commit *)
@@ -101,12 +144,17 @@ ANY(S) == CHOOSE s \in S : TRUE
 
     Properties ==
       /\ EventuallyAllCommitOrAbort
-      /\ EventuallySomeCommit
   }
-  macro AppendHistory(val) {
-    history := Append(history,
-      [proc |-> self, op |-> Hd[self], val |-> val]);
+  macro recordHistoryValue(val) {
+    history := Append(history, [proc |-> self, op |-> Hd[self], val |-> val]);
     transact[self] := Tl[self];
+  }
+  macro recordHistory() {
+    history := Append(history, [proc |-> self, op |-> Hd[self]]);
+    transact[self] := Tl[self];
+  }
+  macro insertHistory(proc, op) {
+    history := Append(history, [proc |-> proc, op |-> op]);
   }
   macro Lock(lock, obj) {
     lock[obj] := lock[obj] \cup {self}
@@ -114,14 +162,14 @@ ANY(S) == CHOOSE s \in S : TRUE
   macro Unlock(lock, proc) {
     lock := [obj \in Object |-> lock[obj] \ {proc}]
   }
-  macro Abort(proc) {
+  macro Abort(proc, reason) {
     state[proc] := "Abort";
+    insertHistory(proc, [f |-> "Abort"]);
     Unlock(WRITE, proc);
   }
   process (proc \in Proc)
     variables
-      writeSet = [obj \in Object |-> {}];
-      reg = 0;
+      reg0 = [proc |-> 0];
     {L10:
      startTS[self] := ts;
      state[self] := "Running";
@@ -139,9 +187,9 @@ ANY(S) == CHOOSE s \in S : TRUE
            (****************************************************************)
            (* Read in SI                                                   *)
            (****************************************************************)
-           reg :=
-             IF writeSet[Hd[self].obj] # {}
-             THEN ANY(writeSet[Hd[self].obj])
+           reg0 :=
+             IF writeSet[self][Hd[self].obj] # {}
+             THEN ANY(writeSet[self][Hd[self].obj])
              ELSE LET h == {i \in store[Hd[self].obj]
                             : i.ver <= startTS[self]}
                       s == CHOOSE i \in h : \A j \in h : i.ver >= j.ver
@@ -152,24 +200,24 @@ ANY(S) == CHOOSE s \in S : TRUE
                   : v.ver > startTS[self]} # {})
              { if ({v \in store[Hd[self].obj]
                     : /\ v.ver > startTS[self]
-                      /\ state[v.proc] = "Commit"
-                      /\ outConflict[v.proc]} # {})
-               { Abort(self);
+                      /\ state[v.val.proc] = "Commit"
+                      /\ outConflict[v.val.proc]} # {})
+               { Abort(self, "dangerous structure");
                  goto L20;
                };
               L31:
                inConflict := [proc \in Proc |->
                    \/ \E v \in {v \in store[Hd[self].obj]
                                 : /\ v.ver > startTS[self]
-                                  /\ state[v.proc] = "Commit"
-                                  /\ outConflict[v.proc]}
-                      : proc = v.proc
+                                  /\ state[v.val.proc] = "Commit"
+                                  /\ outConflict[v.val.proc]}
+                      : proc = v.val.proc
                    \/ inConflict[proc]];
                outConflict[self] := TRUE;
              }
            };
          L32:
-           AppendHistory(reg);
+           recordHistoryValue(reg0);
          }
          or
          { await /\ Hd[self].f = "Write"
@@ -184,7 +232,7 @@ ANY(S) == CHOOSE s \in S : TRUE
              { if ({owner \in SIREAD[Hd[self].obj]
                   : /\ state[owner] = "Commit"
                     /\ inConflict[owner]} # {})
-               { Abort(self);
+               { Abort(self, "dangerous structure");
                  goto L20;
                };
               L41:
@@ -202,22 +250,18 @@ ANY(S) == CHOOSE s \in S : TRUE
            (* Detect Write-Write conflict in SI                            *)
            (****************************************************************)
            if ({i \in store[Hd[self].obj] : i.ver > startTS[self]} # {})
-           { Abort(self);
+           { Abort(self, "FUW");
              goto L20;
            };
           L43:
-           (****************************************************************)
-           (* Write has to write a unique value for serializability tests  *)
-           (* to identify each committed write.                            *)
-           (****************************************************************)
-           writeSet[Hd[self].obj] := {Len(history) + 1};
-           AppendHistory(ANY(writeSet[Hd[self].obj]));
+           writeSet[self][Hd[self].obj] := {[proc |-> self]};
+           recordHistoryValue([proc |-> self]);
          }
          or
          { await Hd[self].f = "Commit";
            if (SERIALIZE)
            { if (inConflict[self] /\ outConflict[self])
-              { Abort(self);
+              { Abort(self, "dangerous structure");
                 goto L20;
               }
            };
@@ -225,82 +269,112 @@ ANY(S) == CHOOSE s \in S : TRUE
            ts := ts + 1;
            commitTS[self] := ts;
            store := [obj \in Object |->
-             IF writeSet[obj] # {}
+             IF writeSet[self][obj] # {}
              THEN store[obj] \cup {[ver |-> commitTS[self],
-                                    val |-> ANY(writeSet[obj]),
-                                    proc |-> self]}
+                                    val |-> ANY(writeSet[self][obj])]}
              ELSE store[obj]];
            state[self] := "Commit";
-           AppendHistory(commitTS[self]);
+           recordHistory();
            Unlock(WRITE, self);
          }
          or
          { await Deadlock[self];
            (* abort a single transaction in deadlock randomly *)
-           with (victim \in Blocking[self]) {
-             Abort(victim);
+           with (victim \in WaitingFor[self, {}]) {
+             Abort(victim, "deadlock");
            };
            goto L20;
+         }
+         or
+         { Abort(self, "voluntary")
          }
        }
     }
   }
  ***************************************************************************)
 \* BEGIN TRANSLATION
-VARIABLES transact, state, history, store, ts, startTS, commitTS, inConflict, 
-          outConflict, SIREAD, WRITE, pc
+VARIABLES transact, state, history, store, ts, writeSet, startTS, commitTS, 
+          inConflict, outConflict, SIREAD, WRITE, pc
 
 (* define statement *)
 Hd[proc \in Proc] == Head(transact[proc])
 Tl[proc \in Proc] == Tail(transact[proc])
 
+TypeOK ==
+  /\ \A idx \in DOMAIN history
+     : LET e == history[idx]
+       IN  /\ e.proc \in Proc
+           /\ \/ /\ e.op.f \in {"Read", "Write"}
+                 /\ e.op.obj \in Object
+                 /\ e.val \in Value
+              \/ e.op.f \in {"Commit", "Abort"}
+  /\ \A proc \in Proc
+     : state[proc] \in {"Init", "Running", "Commit", "Abort"}
+  /\ \A obj \in Object
+     : \A t \in store[obj] : t \in Version
+  /\ \A proc \in Proc
+     : \A obj \in Object
+       : Cardinality(writeSet[proc][obj]) \in {0, 1}
+
+LockOK ==
+  /\ \A obj \in Object
+     : Cardinality(WRITE[obj]) \in {0,1}
 
 
 
 
-RECURSIVE consistent(_, _)
-consistent(s, hist) ==
+
+
+RECURSIVE viewEq(_, _)
+viewEq(s, hist) ==
   IF hist = <<>>
-  THEN TRUE
+  THEN  \A obj \in Object
+        : \E i \in store[obj]
+          : \A j \in store[obj]
+            : i.ver >= j.ver /\ s[obj].proc = i.val.proc
   ELSE LET hd == Head(hist)
-           tl == Tail(hist)
        IN  CASE hd.op.f = "Read"
-                -> s[hd.op.obj] = hd.val /\ consistent(s, tl)
+                -> s[hd.op.obj] = hd.val /\ viewEq(s, Tail(hist))
              [] hd.op.f = "Write"
-                -> consistent([s EXCEPT ![hd.op.obj] = hd.val], tl)
+                -> viewEq([s EXCEPT ![hd.op.obj] = hd.val], Tail(hist))
              [] OTHER
-                -> consistent(s, Tail(hist))
+                -> viewEq(s, Tail(hist))
 
-Serializable ==
+ViewSerializable ==
   LET Tx == {SelectSeq(history, LAMBDA x: x.proc = proc) : proc
              \in {proc \in Proc : state[proc] = "Commit"}}
       perms == {f \in [1..Cardinality(Tx) -> Tx]
-                    : \A tx \in Tx
-                      : \E proc \in 1..Cardinality(Tx) : f[proc] = tx}
+                : \A tx \in Tx
+                  : \E idx \in 1..Cardinality(Tx) : f[idx] = tx}
    IN LET RECURSIVE concat(_, _, _, _)
           concat(f, n, size, acc) ==
             IF n > size THEN acc ELSE concat(f, n+1, size, acc \o f[n])
-       IN \E perm \in perms
-          : LET serial == concat(perm, 1, Cardinality(Tx), <<>>)
-            IN  consistent([obj \in Object |-> 0], serial)
+      IN  \E perm \in perms
+          : viewEq([obj \in Object |-> [proc |-> 0]],
+                   concat(perm, 1, Cardinality(Tx), <<>>))
+
+
+
+Invariants ==
+  /\ TypeOK
+  /\ LockOK
+  /\ ViewSerializable
 
 
 
 
-
-
-Waiting[self \in Proc, blocking \in SUBSET Proc] ==
+WaitingFor[self \in Proc, blocking \in SUBSET Proc] ==
   IF self \in blocking \/ state[self] # "Running"
   THEN {}
-  ELSE LET grandChildren(p) == Waiting[p, blocking \cup {self}]
+  ELSE LET grandChildren(proc) == WaitingFor[proc, blocking \cup {self}]
        IN LET dependsOn(children) ==
-                children \cup UNION {grandChildren(p) : p \in children}
+                children \cup UNION {grandChildren(proc) : proc \in children}
               hd == Head(transact[self])
           IN  CASE hd.f = "Write"
                    -> dependsOn(WRITE[hd.obj] \ {self})
                 [] OTHER -> {}
-Blocking[self \in Proc] == Waiting[self, {}]
-Deadlock[self \in Proc] == self \in Blocking[self]
+
+Deadlock[self \in Proc] == self \in WaitingFor[self, {}]
 
 
 
@@ -318,12 +392,11 @@ EventuallySomeCommit ==
 
 Properties ==
   /\ EventuallyAllCommitOrAbort
-  /\ EventuallySomeCommit
 
-VARIABLES writeSet, reg
+VARIABLE reg0
 
-vars == << transact, state, history, store, ts, startTS, commitTS, inConflict, 
-           outConflict, SIREAD, WRITE, pc, writeSet, reg >>
+vars == << transact, state, history, store, ts, writeSet, startTS, commitTS, 
+           inConflict, outConflict, SIREAD, WRITE, pc, reg0 >>
 
 ProcSet == (Proc)
 
@@ -331,8 +404,9 @@ Init == (* Global variables *)
         /\ transact \in [Proc -> Transact]
         /\ state = [proc \in Proc |-> "Init"]
         /\ history = <<>>
-        /\ store = [obj \in Object |-> {[ver |-> 0, val |-> 0]}]
+        /\ store = InitValues
         /\ ts = 0
+        /\ writeSet = [proc \in Proc |-> [obj \in Object |-> {}]]
         /\ startTS = [proc \in Proc |-> 0]
         /\ commitTS = [proc \in Proc |-> 0]
         /\ inConflict = [proc \in Proc |-> FALSE]
@@ -340,17 +414,15 @@ Init == (* Global variables *)
         /\ SIREAD = [obj \in Object |-> {}]
         /\ WRITE = [obj \in Object |-> {}]
         (* Process proc *)
-        /\ writeSet = [self \in Proc |-> [obj \in Object |-> {}]]
-        /\ reg = [self \in Proc |-> 0]
+        /\ reg0 = [self \in Proc |-> [proc |-> 0]]
         /\ pc = [self \in ProcSet |-> "L10"]
 
 L10(self) == /\ pc[self] = "L10"
              /\ startTS' = [startTS EXCEPT ![self] = ts]
              /\ state' = [state EXCEPT ![self] = "Running"]
              /\ pc' = [pc EXCEPT ![self] = "L20"]
-             /\ UNCHANGED << transact, history, store, ts, commitTS, 
-                             inConflict, outConflict, SIREAD, WRITE, writeSet, 
-                             reg >>
+             /\ UNCHANGED << transact, history, store, ts, writeSet, commitTS, 
+                             inConflict, outConflict, SIREAD, WRITE, reg0 >>
 
 L20(self) == /\ pc[self] = "L20"
              /\ IF state[self] = "Running"
@@ -364,42 +436,49 @@ L20(self) == /\ pc[self] = "L20"
                                     ELSE /\ TRUE
                                          /\ UNCHANGED << inConflict, 
                                                          outConflict, SIREAD >>
-                              /\ reg' = [reg EXCEPT ![self] = IF writeSet[self][Hd[self].obj] # {}
-                                                              THEN ANY(writeSet[self][Hd[self].obj])
-                                                              ELSE LET h == {i \in store[Hd[self].obj]
-                                                                             : i.ver <= startTS[self]}
-                                                                       s == CHOOSE i \in h : \A j \in h : i.ver >= j.ver
-                                                                   IN  s.val]
+                              /\ reg0' = [reg0 EXCEPT ![self] = IF writeSet[self][Hd[self].obj] # {}
+                                                                THEN ANY(writeSet[self][Hd[self].obj])
+                                                                ELSE LET h == {i \in store[Hd[self].obj]
+                                                                               : i.ver <= startTS[self]}
+                                                                         s == CHOOSE i \in h : \A j \in h : i.ver >= j.ver
+                                                                     IN  s.val]
                               /\ pc' = [pc EXCEPT ![self] = "L30"]
-                              /\ UNCHANGED <<state, WRITE>>
+                              /\ UNCHANGED <<state, history, WRITE>>
                            \/ /\ /\ Hd[self].f = "Write"
                                  /\ WRITE[Hd[self].obj] \in {{}, {self}}
                               /\ WRITE' = [WRITE EXCEPT ![(Hd[self].obj)] = WRITE[(Hd[self].obj)] \cup {self}]
                               /\ pc' = [pc EXCEPT ![self] = "L40"]
-                              /\ UNCHANGED <<state, inConflict, outConflict, SIREAD, reg>>
+                              /\ UNCHANGED <<state, history, inConflict, outConflict, SIREAD, reg0>>
                            \/ /\ Hd[self].f = "Commit"
                               /\ IF SERIALIZE
                                     THEN /\ IF inConflict[self] /\ outConflict[self]
                                                THEN /\ state' = [state EXCEPT ![self] = "Abort"]
+                                                    /\ history' = Append(history, [proc |-> self, op |-> ([f |-> "Abort"])])
                                                     /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {self}]
                                                     /\ pc' = [pc EXCEPT ![self] = "L20"]
                                                ELSE /\ pc' = [pc EXCEPT ![self] = "L50"]
                                                     /\ UNCHANGED << state, 
+                                                                    history, 
                                                                     WRITE >>
                                     ELSE /\ pc' = [pc EXCEPT ![self] = "L50"]
-                                         /\ UNCHANGED << state, WRITE >>
-                              /\ UNCHANGED <<inConflict, outConflict, SIREAD, reg>>
+                                         /\ UNCHANGED << state, history, WRITE >>
+                              /\ UNCHANGED <<inConflict, outConflict, SIREAD, reg0>>
                            \/ /\ Deadlock[self]
-                              /\ \E victim \in Blocking[self]:
+                              /\ \E victim \in WaitingFor[self, {}]:
                                    /\ state' = [state EXCEPT ![victim] = "Abort"]
+                                   /\ history' = Append(history, [proc |-> victim, op |-> ([f |-> "Abort"])])
                                    /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {victim}]
                               /\ pc' = [pc EXCEPT ![self] = "L20"]
-                              /\ UNCHANGED <<inConflict, outConflict, SIREAD, reg>>
+                              /\ UNCHANGED <<inConflict, outConflict, SIREAD, reg0>>
+                           \/ /\ state' = [state EXCEPT ![self] = "Abort"]
+                              /\ history' = Append(history, [proc |-> self, op |-> ([f |-> "Abort"])])
+                              /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {self}]
+                              /\ pc' = [pc EXCEPT ![self] = "L20"]
+                              /\ UNCHANGED <<inConflict, outConflict, SIREAD, reg0>>
                    ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
-                        /\ UNCHANGED << state, inConflict, outConflict, SIREAD, 
-                                        WRITE, reg >>
-             /\ UNCHANGED << transact, history, store, ts, startTS, commitTS, 
-                             writeSet >>
+                        /\ UNCHANGED << state, history, inConflict, 
+                                        outConflict, SIREAD, WRITE, reg0 >>
+             /\ UNCHANGED << transact, store, ts, writeSet, startTS, commitTS >>
 
 L30(self) == /\ pc[self] = "L30"
              /\ IF SERIALIZE
@@ -407,40 +486,41 @@ L30(self) == /\ pc[self] = "L30"
                                : v.ver > startTS[self]} # {}
                               THEN /\ IF {v \in store[Hd[self].obj]
                                           : /\ v.ver > startTS[self]
-                                            /\ state[v.proc] = "Commit"
-                                            /\ outConflict[v.proc]} # {}
+                                            /\ state[v.val.proc] = "Commit"
+                                            /\ outConflict[v.val.proc]} # {}
                                          THEN /\ state' = [state EXCEPT ![self] = "Abort"]
+                                              /\ history' = Append(history, [proc |-> self, op |-> ([f |-> "Abort"])])
                                               /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {self}]
                                               /\ pc' = [pc EXCEPT ![self] = "L20"]
                                          ELSE /\ pc' = [pc EXCEPT ![self] = "L31"]
-                                              /\ UNCHANGED << state, WRITE >>
+                                              /\ UNCHANGED << state, history, 
+                                                              WRITE >>
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L32"]
-                                   /\ UNCHANGED << state, WRITE >>
+                                   /\ UNCHANGED << state, history, WRITE >>
                    ELSE /\ pc' = [pc EXCEPT ![self] = "L32"]
-                        /\ UNCHANGED << state, WRITE >>
-             /\ UNCHANGED << transact, history, store, ts, startTS, commitTS, 
-                             inConflict, outConflict, SIREAD, writeSet, reg >>
+                        /\ UNCHANGED << state, history, WRITE >>
+             /\ UNCHANGED << transact, store, ts, writeSet, startTS, commitTS, 
+                             inConflict, outConflict, SIREAD, reg0 >>
 
 L31(self) == /\ pc[self] = "L31"
              /\ inConflict' =           [proc \in Proc |->
                               \/ \E v \in {v \in store[Hd[self].obj]
                                            : /\ v.ver > startTS[self]
-                                             /\ state[v.proc] = "Commit"
-                                             /\ outConflict[v.proc]}
-                                 : proc = v.proc
+                                             /\ state[v.val.proc] = "Commit"
+                                             /\ outConflict[v.val.proc]}
+                                 : proc = v.val.proc
                               \/ inConflict[proc]]
              /\ outConflict' = [outConflict EXCEPT ![self] = TRUE]
              /\ pc' = [pc EXCEPT ![self] = "L32"]
-             /\ UNCHANGED << transact, state, history, store, ts, startTS, 
-                             commitTS, SIREAD, WRITE, writeSet, reg >>
+             /\ UNCHANGED << transact, state, history, store, ts, writeSet, 
+                             startTS, commitTS, SIREAD, WRITE, reg0 >>
 
 L32(self) == /\ pc[self] = "L32"
-             /\ history' =          Append(history,
-                           [proc |-> self, op |-> Hd[self], val |-> reg[self]])
+             /\ history' = Append(history, [proc |-> self, op |-> Hd[self], val |-> reg0[self]])
              /\ transact' = [transact EXCEPT ![self] = Tl[self]]
              /\ pc' = [pc EXCEPT ![self] = "L20"]
-             /\ UNCHANGED << state, store, ts, startTS, commitTS, inConflict, 
-                             outConflict, SIREAD, WRITE, writeSet, reg >>
+             /\ UNCHANGED << state, store, ts, writeSet, startTS, commitTS, 
+                             inConflict, outConflict, SIREAD, WRITE, reg0 >>
 
 L40(self) == /\ pc[self] = "L40"
              /\ IF SERIALIZE
@@ -452,16 +532,18 @@ L40(self) == /\ pc[self] = "L40"
                                          : /\ state[owner] = "Commit"
                                            /\ inConflict[owner]} # {}
                                          THEN /\ state' = [state EXCEPT ![self] = "Abort"]
+                                              /\ history' = Append(history, [proc |-> self, op |-> ([f |-> "Abort"])])
                                               /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {self}]
                                               /\ pc' = [pc EXCEPT ![self] = "L20"]
                                          ELSE /\ pc' = [pc EXCEPT ![self] = "L41"]
-                                              /\ UNCHANGED << state, WRITE >>
+                                              /\ UNCHANGED << state, history, 
+                                                              WRITE >>
                               ELSE /\ pc' = [pc EXCEPT ![self] = "L42"]
-                                   /\ UNCHANGED << state, WRITE >>
+                                   /\ UNCHANGED << state, history, WRITE >>
                    ELSE /\ pc' = [pc EXCEPT ![self] = "L42"]
-                        /\ UNCHANGED << state, WRITE >>
-             /\ UNCHANGED << transact, history, store, ts, startTS, commitTS, 
-                             inConflict, outConflict, SIREAD, writeSet, reg >>
+                        /\ UNCHANGED << state, history, WRITE >>
+             /\ UNCHANGED << transact, store, ts, writeSet, startTS, commitTS, 
+                             inConflict, outConflict, SIREAD, reg0 >>
 
 L41(self) == /\ pc[self] = "L41"
              /\ outConflict' =              [proc \in Proc
@@ -472,27 +554,27 @@ L41(self) == /\ pc[self] = "L41"
                                    \/ outConflict[proc]]
              /\ inConflict' = [inConflict EXCEPT ![self] = TRUE]
              /\ pc' = [pc EXCEPT ![self] = "L42"]
-             /\ UNCHANGED << transact, state, history, store, ts, startTS, 
-                             commitTS, SIREAD, WRITE, writeSet, reg >>
+             /\ UNCHANGED << transact, state, history, store, ts, writeSet, 
+                             startTS, commitTS, SIREAD, WRITE, reg0 >>
 
 L42(self) == /\ pc[self] = "L42"
              /\ IF {i \in store[Hd[self].obj] : i.ver > startTS[self]} # {}
                    THEN /\ state' = [state EXCEPT ![self] = "Abort"]
+                        /\ history' = Append(history, [proc |-> self, op |-> ([f |-> "Abort"])])
                         /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {self}]
                         /\ pc' = [pc EXCEPT ![self] = "L20"]
                    ELSE /\ pc' = [pc EXCEPT ![self] = "L43"]
-                        /\ UNCHANGED << state, WRITE >>
-             /\ UNCHANGED << transact, history, store, ts, startTS, commitTS, 
-                             inConflict, outConflict, SIREAD, writeSet, reg >>
+                        /\ UNCHANGED << state, history, WRITE >>
+             /\ UNCHANGED << transact, store, ts, writeSet, startTS, commitTS, 
+                             inConflict, outConflict, SIREAD, reg0 >>
 
 L43(self) == /\ pc[self] = "L43"
-             /\ writeSet' = [writeSet EXCEPT ![self][Hd[self].obj] = {Len(history) + 1}]
-             /\ history' =          Append(history,
-                           [proc |-> self, op |-> Hd[self], val |-> (ANY(writeSet'[self][Hd[self].obj]))])
+             /\ writeSet' = [writeSet EXCEPT ![self][Hd[self].obj] = {[proc |-> self]}]
+             /\ history' = Append(history, [proc |-> self, op |-> Hd[self], val |-> ([proc |-> self])])
              /\ transact' = [transact EXCEPT ![self] = Tl[self]]
              /\ pc' = [pc EXCEPT ![self] = "L20"]
              /\ UNCHANGED << state, store, ts, startTS, commitTS, inConflict, 
-                             outConflict, SIREAD, WRITE, reg >>
+                             outConflict, SIREAD, WRITE, reg0 >>
 
 L50(self) == /\ pc[self] = "L50"
              /\ ts' = ts + 1
@@ -500,17 +582,15 @@ L50(self) == /\ pc[self] = "L50"
              /\ store' =        [obj \in Object |->
                          IF writeSet[self][obj] # {}
                          THEN store[obj] \cup {[ver |-> commitTS'[self],
-                                                val |-> ANY(writeSet[self][obj]),
-                                                proc |-> self]}
+                                                val |-> ANY(writeSet[self][obj])]}
                          ELSE store[obj]]
              /\ state' = [state EXCEPT ![self] = "Commit"]
-             /\ history' =          Append(history,
-                           [proc |-> self, op |-> Hd[self], val |-> (commitTS'[self])])
+             /\ history' = Append(history, [proc |-> self, op |-> Hd[self]])
              /\ transact' = [transact EXCEPT ![self] = Tl[self]]
              /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {self}]
              /\ pc' = [pc EXCEPT ![self] = "L20"]
-             /\ UNCHANGED << startTS, inConflict, outConflict, SIREAD, 
-                             writeSet, reg >>
+             /\ UNCHANGED << writeSet, startTS, inConflict, outConflict, 
+                             SIREAD, reg0 >>
 
 proc(self) == L10(self) \/ L20(self) \/ L30(self) \/ L31(self) \/ L32(self)
                  \/ L40(self) \/ L41(self) \/ L42(self) \/ L43(self)
@@ -529,5 +609,5 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 =============================================================================
 \* Modification History
-\* Last modified Sat Feb 24 12:55:13 JST 2018 by takayuki
+\* Last modified Sun Mar 04 13:34:46 JST 2018 by takayuki
 \* Created Wed Feb 21 14:32:17 JST 2018 by takayuki
