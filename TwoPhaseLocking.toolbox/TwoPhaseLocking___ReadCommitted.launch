@@ -35,10 +35,10 @@
 <listAttribute key="modelParameterConstants">
 <listEntry value="Proc;;{1, 2};0;0"/>
 <listEntry value="Object;;{X, Y};1;0"/>
+<listEntry value="MAXTXOPS;;2;0;0"/>
 </listAttribute>
 <stringAttribute key="modelParameterContraint" value=""/>
 <listAttribute key="modelParameterDefinitions">
-<listEntry value="Nat;;1..2;0;0"/>
 <listEntry value="Read;self:hd:tl:;ReadShortDurationLock(self, hd, tl);0;0"/>
 </listAttribute>
 <stringAttribute key="modelParameterModelValues" value="{}"/>

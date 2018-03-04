@@ -1,15 +1,18 @@
 -------------------------- MODULE TwoPhaseLocking --------------------------
 EXTENDS FiniteSets, Naturals, Sequences, TLC
 
-CONSTANT Proc, Object
+CONSTANT Proc, Object, MAXTXOPS
 
 (***************************************************************************)
-(* Proc is a set of transaction IDs.  Note that transaction #0 is a        *)
-(* hypothetical transaction that wrote all initial values in store.        *)
+(* Proc is a set of non-zero process IDs, i.e.  TXIDs.  Note that TXID #0  *)
+(* is a hypothetical transaction that wrote all initial values in store.   *)
+(* Object represents a set of objects in database.  MAXTXOPS is the max    *)
+(* number of read and write operations in a transaction.                   *)
 (***************************************************************************)
 ASSUME
   /\ Proc \subseteq Nat \ {0}
   /\ Proc \cap Object = {}
+  /\ MAXTXOPS \in Nat \ {0}
 
 VARIABLE
   transact,
@@ -35,16 +38,17 @@ vars == <<
 (***************************************************************************)
 Transaction ==
   LET Op == [f : {"Read", "Write"}, obj : Object]
-      seq(S) == UNION {[1..n -> S] : n \in Nat}
+      seq(S) == UNION {[1..n -> S] : n \in 1..MAXTXOPS}
   IN  {Append(op, [f |-> "Commit"]) : op \in seq(Op)}
 
-initValues == [obj \in Object |-> [proc |-> 0]]
+Value == [proc : {0} \cup Proc]
+InitValues == [obj \in Object |-> [proc |-> 0]]
 
 Init ==
   /\ \E tx \in [Proc -> Transaction] : transact = tx
   /\ history = <<>>
   /\ state = [proc \in Proc |-> "Init"]
-  /\ store = initValues
+  /\ store = InitValues
   /\ writeSet = [proc \in Proc |-> [obj \in Object |-> {}]]
   /\ READ = [obj \in Object |-> {}]
   /\ WRITE = [obj \in Object |-> {}]
@@ -60,16 +64,23 @@ bufferRead(self, obj) ==
 bufferFlush(self) ==
   store' = [obj \in Object |-> bufferRead(self, obj)]
 
-updateHistory(self, hd, tl, val) ==
+recordHistoryValue(self, hd, tl, val) ==
   /\ history' = Append(history, [proc |-> self, op |-> hd, val |-> val])
   /\ transact' = [transact EXCEPT ![self] = tl]
+
+recordHistory(self, hd, tl) ==
+  /\ history' = Append(history, [proc |-> self, op |-> hd])
+  /\ transact' = [transact EXCEPT ![self] = tl]
+
+insertHistory(self, op) ==
+  /\ history' = Append(history, [proc |-> self, op |-> op])
 
 ReadLongDurationLock(self, hd, tl) ==
   /\ state[self] \in {"Init", "Running"}
   /\ hd.f = "Read"
   /\ WRITE[hd.obj] \in {{}, {self}}
   /\ READ' = [READ EXCEPT ![hd.obj] = READ[hd.obj] \cup {self}]
-  /\ updateHistory(self, hd, tl, bufferRead(self, hd.obj))
+  /\ recordHistoryValue(self, hd, tl, bufferRead(self, hd.obj))
   /\ IF state[self] = "Init"
      THEN /\ state' = [state EXCEPT ![self] = "Running"]
           /\ UNCHANGED <<store, writeSet, WRITE>>
@@ -79,7 +90,7 @@ ReadShortDurationLock(self, hd, tl) ==
   /\ state[self] \in {"Init", "Running"}
   /\ hd.f = "Read"
   /\ WRITE[hd.obj] \in {{}, {self}}
-  /\ updateHistory(self, hd, tl, bufferRead(self, hd.obj))
+  /\ recordHistoryValue(self, hd, tl, bufferRead(self, hd.obj))
   /\ IF state[self] = "Init"
      THEN /\ state' = [state EXCEPT ![self] = "Running"]
           /\ UNCHANGED <<store, writeSet, READ, WRITE>>
@@ -94,7 +105,7 @@ Write(self, hd, tl) ==
   /\ WRITE' = [WRITE EXCEPT ![hd.obj] = WRITE[hd.obj] \cup {self}]
   /\ READ[hd.obj] \in SUBSET WRITE'[hd.obj]
   /\ bufferWrite(self, hd.obj, [proc |-> self])
-  /\ updateHistory(self, hd, tl, [proc |-> self])
+  /\ recordHistoryValue(self, hd, tl, [proc |-> self])
   /\ IF state[self] = "Init"
      THEN /\ state' = [state EXCEPT ![self] = "Running"]
           /\ UNCHANGED <<store, READ>>
@@ -103,16 +114,16 @@ Write(self, hd, tl) ==
 Commit(self, hd, tl) ==
   /\ state[self] \in {"Init", "Running"}
   /\ hd.f = "Commit"
-  /\ updateHistory(self, hd, tl, [proc |-> self])
+  /\ recordHistory(self, hd, tl)
   /\ bufferFlush(self)
   /\ state' = [state EXCEPT ![self] = "Commit"]
   /\ READ' = [obj \in Object |-> READ[obj] \ {self}]
   /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {self}]
   /\ UNCHANGED <<writeSet>>
 
-Abort(self, victim) ==
+Abort(self, victim, reason) ==
   /\ state[victim] \in {"Init", "Running"}
-  /\ history' = Append(history, [proc |-> victim, op |-> [f |-> "Abort"]])
+  /\ insertHistory(victim, [f |-> "Abort"])
   /\ state' = [state EXCEPT ![victim] = "Abort"]
   /\ READ' = [obj \in Object |-> READ[obj] \ {victim}]
   /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {victim}]
@@ -148,7 +159,7 @@ ViewSerializable ==
           concat(f, n, size, acc) ==
             IF n > size THEN acc ELSE concat(f, n+1, size, acc \o f[n])
        IN \E perm \in perms
-          : viewEq(initValues, concat(perm, 1, Cardinality(Tx), <<>>))
+          : viewEq(InitValues, concat(perm, 1, Cardinality(Tx), <<>>))
 \*            /\ \/ Cardinality(Tx) < 2
 \*               \/ PrintT(<<history, concat(perm, 1, Cardinality(Tx), <<>>)>>)
 
@@ -158,8 +169,20 @@ ViewSerializable ==
 (* the history of the committed transactions is serializable.              *)
 (***************************************************************************)
 TypeOK ==
+  /\ \A idx \in DOMAIN history
+     : LET e == history[idx]
+       IN  /\ e.proc \in Proc
+           /\ \/ /\ e.op.f \in {"Read", "Write"}
+                 /\ e.op.obj \in Object
+                 /\ e.val \in Value
+              \/ e.op.f \in {"Commit", "Abort"}
   /\ \A proc \in Proc
      : state[proc] \in {"Init", "Running", "Commit", "Abort"}
+  /\ \A obj \in Object
+     : store[obj] \in Value
+  /\ \A proc \in Proc
+     : \A obj \in Object
+       : Cardinality(writeSet[proc][obj]) \in {0, 1}
 
 LockOK ==
   /\ \A obj \in Object
@@ -195,17 +218,18 @@ Resolve(self) ==
    IN  /\ (* <=> Deadlock[self] *)
            self \in waitingFor
        /\ (* abort a single transaction in deadlock randomly *)
-          \E victim \in waitingFor : Abort(self, victim)
+          \E victim \in waitingFor : Abort(self, victim, "deadlock")
 
 Next ==
   \/ \E self \in Proc
-     : /\ transact[self] # <<>>
-       /\ LET hd == Head(transact[self])
-              tl == Tail(transact[self])
-          IN  \/ Read(self, hd, tl)
-              \/ Write(self, hd, tl)
-              \/ Commit(self, hd, tl)
-              \/ Resolve(self)
+     : \/ /\ transact[self] # <<>>
+          /\ LET hd == Head(transact[self])
+                 tl == Tail(transact[self])
+             IN  \/ Read(self, hd, tl)
+                 \/ Write(self, hd, tl)
+                 \/ Commit(self, hd, tl)
+                 \/ Resolve(self)
+       \/ Abort(self, self, "voluntary")
   \/ /\ \A proc \in Proc : state[proc] \in {"Commit", "Abort"}
      /\ UNCHANGED vars
 
@@ -223,5 +247,5 @@ Properties == EventuallyAllCommitOrAbort
 THEOREM Spec => []Invariants /\ Properties
 =============================================================================
 \* Modification History
-\* Last modified Sat Mar 03 14:33:25 JST 2018 by takayuki
+\* Last modified Sun Mar 04 11:45:11 JST 2018 by takayuki
 \* Created Sat Feb 17 10:34:44 JST 2018 by takayuki
