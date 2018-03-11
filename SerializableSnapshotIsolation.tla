@@ -20,6 +20,7 @@ ASSUME
   /\ MAXTXOPS \in Nat \ {0}
 
 ANY(S) == CHOOSE s \in S : TRUE
+RANGE(f) == {f[x] : x \in DOMAIN f}
 
 Starting == "Starting"
 Running == "Running"
@@ -81,6 +82,34 @@ InitValues == [obj \in Object |-> {[ver |-> 0, val |-> [proc |-> 0]]}]
          : Cardinality(WRITE[obj]) \in {0,1}
 
     (***********************************************************************)
+    (* ConflictSerializable tests if a multiversion serialization graph    *)
+    (* has no cycle, and asserts that the history of the committed         *)
+    (* transactions is conflict-serializable.                              *)
+    (***********************************************************************)
+    DependsOn[visiting \in Proc, visited \in SUBSET Proc] ==
+      IF visiting \in visited
+      THEN {}
+      ELSE LET dependsOn(children) ==
+                 children \cup UNION {DependsOn[proc, visited \cup {visiting}] : proc \in children}
+               conflict(X, Y) ==
+                 LET C  == RANGE(SelectSeq(history, LAMBDA x: state[x.proc] = Commit))
+                     CX == {c \in C : c.proc = visiting /\ c.op.f = X}
+                     CXOBJ == {cx.op.obj : cx \in CX}
+                     CY == {c \in C : c.op.f = Y /\ c.op.obj \in CXOBJ}
+                 IN  {cy.proc : cy \in CY}
+           IN LET wr == {r \in conflict(Write, Read) : commitTS[visiting] <= startTS[r] /\ state[r] = Commit}
+                  ww == {w \in conflict(Write, Write): commitTS[visiting] <= startTS[w] /\ state[w] = Commit}
+                  rw == {w \in conflict(Read,  Write): startTS[visiting]  < commitTS[w] /\ state[w] = Commit}
+              IN  UNION {
+                    dependsOn(wr \ {visiting}),
+                    dependsOn(ww \ {visiting}),
+                    dependsOn(rw \ {visiting})}
+
+    ConflictSerializable ==
+      \A proc \in {proc \in Proc : state[proc] = Commit}
+      : proc \notin DependsOn[proc, {}]
+
+    (***********************************************************************)
     (* ViewSerializable asserts that, if some of transactions successfully *)
     (* commit, the history of the committed transactions is                *)
     (* view-serializable.                                                  *)
@@ -118,13 +147,14 @@ InitValues == [obj \in Object |-> {[ver |-> 0, val |-> [proc |-> 0]]}]
     Invariants ==
       /\ TypeOK
       /\ LockOK
+      /\ ConflictSerializable
       /\ ViewSerializable
 
     (***********************************************************************)
     (* Deadlock asserts that a process is stopping in a deadlock           *)
     (***********************************************************************)
     WaitingFor[visiting \in Proc, visited \in SUBSET Proc] ==
-      IF self \in blocking \/ state[self] # Running
+      IF visiting \in visited \/ state[visiting] # Running
       THEN {}
       ELSE LET dependsOn(children) ==
                  children \cup UNION {WaitingFor[proc, visited \cup {visiting}]
@@ -333,6 +363,34 @@ LockOK ==
 
 
 
+DependsOn[visiting \in Proc, visited \in SUBSET Proc] ==
+  IF visiting \in visited
+  THEN {}
+  ELSE LET dependsOn(children) ==
+             children \cup UNION {DependsOn[proc, visited \cup {visiting}] : proc \in children}
+           conflict(X, Y) ==
+             LET C  == RANGE(SelectSeq(history, LAMBDA x: state[x.proc] = Commit))
+                 CX == {c \in C : c.proc = visiting /\ c.op.f = X}
+                 CXOBJ == {cx.op.obj : cx \in CX}
+                 CY == {c \in C : c.op.f = Y /\ c.op.obj \in CXOBJ}
+             IN  {cy.proc : cy \in CY}
+       IN LET wr == {r \in conflict(Write, Read) : commitTS[visiting] <= startTS[r] /\ state[r] = Commit}
+              ww == {w \in conflict(Write, Write): commitTS[visiting] <= startTS[w] /\ state[w] = Commit}
+              rw == {w \in conflict(Read,  Write): startTS[visiting]  < commitTS[w] /\ state[w] = Commit}
+          IN  UNION {
+                dependsOn(wr \ {visiting}),
+                dependsOn(ww \ {visiting}),
+                dependsOn(rw \ {visiting})}
+
+ConflictSerializable ==
+  \A proc \in {proc \in Proc : state[proc] = Commit}
+  : proc \notin DependsOn[proc, {}]
+
+
+
+
+
+
 RECURSIVE viewEq(_, _)
 viewEq(s, hist) ==
   IF hist = <<>>
@@ -366,21 +424,22 @@ ViewSerializable ==
 Invariants ==
   /\ TypeOK
   /\ LockOK
+  /\ ConflictSerializable
   /\ ViewSerializable
 
 
 
 
-WaitingFor[self \in Proc, blocking \in SUBSET Proc] ==
-  IF self \in blocking \/ state[self] # Running
+WaitingFor[visiting \in Proc, visited \in SUBSET Proc] ==
+  IF visiting \in visited \/ state[visiting] # Running
   THEN {}
-  ELSE LET grandChildren(proc) == WaitingFor[proc, blocking \cup {self}]
-       IN LET dependsOn(children) ==
-                children \cup UNION {grandChildren(proc) : proc \in children}
-              hd == Head(transact[self])
-          IN  CASE hd.f = Write
-                   -> dependsOn(WRITE[hd.obj] \ {self})
-                [] OTHER -> {}
+  ELSE LET dependsOn(children) ==
+             children \cup UNION {WaitingFor[proc, visited \cup {visiting}]
+                                  : proc \in children}
+           hd == Head(transact[visiting])
+       IN CASE hd.f = Write
+                 -> dependsOn(WRITE[hd.obj] \ {visiting})
+            [] OTHER -> {}
 
 Deadlock[self \in Proc] == self \in WaitingFor[self, {}]
 
@@ -617,5 +676,5 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Mar 11 11:38:52 JST 2018 by takayuki
+\* Last modified Sun Mar 11 16:17:47 JST 2018 by takayuki
 \* Created Wed Feb 21 14:32:17 JST 2018 by takayuki

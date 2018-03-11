@@ -19,12 +19,13 @@
 <stringAttribute key="modelBehaviorNext" value=""/>
 <stringAttribute key="modelBehaviorSpec" value="Spec"/>
 <intAttribute key="modelBehaviorSpecType" value="1"/>
-<stringAttribute key="modelBehaviorVars" value="SIREAD, outConflict, reg0, store, writeSet, pc, state, startTS, transact, history, commitTS, ts, inConflict, WRITE"/>
+<stringAttribute key="modelBehaviorVars" value="SIREAD, outConflict, store, writeSet, pc, state, temp, startTS, transact, history, commitTS, ts, inConflict, WRITE"/>
 <stringAttribute key="modelComments" value=""/>
 <booleanAttribute key="modelCorrectnessCheckDeadlock" value="true"/>
 <listAttribute key="modelCorrectnessInvariants">
 <listEntry value="1TypeOK"/>
 <listEntry value="1LockOK"/>
+<listEntry value="1ConflictSerializable"/>
 <listEntry value="1ViewSerializable"/>
 </listAttribute>
 <listAttribute key="modelCorrectnessProperties">
@@ -51,6 +52,10 @@
 <intAttribute key="simuDepth" value="100"/>
 <intAttribute key="simuSeed" value="-1"/>
 <stringAttribute key="specName" value="SerializableSnapshotIsolation"/>
+<listAttribute key="traceExploreExpressions">
+<listEntry value="1ConflictSerializable"/>
+<listEntry value="1ViewSerializable"/>
+</listAttribute>
 <stringAttribute key="view" value=""/>
 <booleanAttribute key="visualizeStateGraph" value="false"/>
 </launchConfiguration>
