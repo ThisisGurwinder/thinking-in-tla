@@ -41,6 +41,7 @@ Transaction ==
       seq(S) == UNION {[1..n -> S] : n \in 1..MAXTXOPS}
   IN  {Append(op, [f |-> "Commit"]) : op \in seq(Op)}
 
+State == {"Init", "Running", "Commit", "Abort"}
 Value == [proc : {0} \cup Proc]
 InitValues == [obj \in Object |-> [proc |-> 0]]
 
@@ -72,7 +73,7 @@ recordHistory(self, hd, tl) ==
   /\ history' = Append(history, [proc |-> self, op |-> hd])
   /\ transact' = [transact EXCEPT ![self] = tl]
 
-insertHistory(self, op) ==
+appendHistory(self, op) ==
   /\ history' = Append(history, [proc |-> self, op |-> op])
 
 ReadLongDurationLock(self, hd, tl) ==
@@ -121,9 +122,9 @@ Commit(self, hd, tl) ==
   /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {self}]
   /\ UNCHANGED <<writeSet>>
 
-Abort(self, victim, reason) ==
+Abort(victim, reason) ==
   /\ state[victim] \in {"Init", "Running"}
-  /\ insertHistory(victim, [f |-> "Abort"])
+  /\ appendHistory(victim, [f |-> "Abort", reason|-> reason])
   /\ state' = [state EXCEPT ![victim] = "Abort"]
   /\ READ' = [obj \in Object |-> READ[obj] \ {victim}]
   /\ WRITE' = [obj \in Object |-> WRITE[obj] \ {victim}]
@@ -177,7 +178,7 @@ TypeOK ==
                  /\ e.val \in Value
               \/ e.op.f \in {"Commit", "Abort"}
   /\ \A proc \in Proc
-     : state[proc] \in {"Init", "Running", "Commit", "Abort"}
+     : state[proc] \in State
   /\ \A obj \in Object
      : store[obj] \in Value
   /\ \A proc \in Proc
@@ -198,18 +199,18 @@ Invariants ==
 (***************************************************************************)
 (* Deadlock asserts that a process is stopping in a deadlock               *)
 (***************************************************************************)
-WaitingFor[self \in Proc, blocking \in SUBSET Proc] ==
-  IF self \in blocking \/ state[self] # "Running"
+WaitingFor[visiting \in Proc, visited \in SUBSET Proc] ==
+  IF visiting \in visited \/ state[visiting] # "Running"
   THEN {}
-  ELSE LET grandChildren(proc) == WaitingFor[proc, blocking \cup {self}]
-       IN LET dependsOn(children) ==
-                children \cup UNION {grandChildren(proc) : proc \in children}
-              hd == Head(transact[self])
-          IN  CASE hd.f = "Read"
-                   -> dependsOn(WRITE[hd.obj] \ {self})
-                [] hd.f = "Write"
-                   -> dependsOn((READ[hd.obj] \cup WRITE[hd.obj]) \ {self})
-                [] OTHER -> {}
+  ELSE LET dependsOn(children) ==
+             children \cup UNION {WaitingFor[proc, visited \cup {visiting}]
+                                  : proc \in children}
+           hd == Head(transact[visiting])
+       IN  CASE hd.f = "Read"
+                  -> dependsOn(WRITE[hd.obj] \ {visiting})
+             [] hd.f = "Write"
+                  -> dependsOn((READ[hd.obj] \cup WRITE[hd.obj]) \ {visiting})
+             [] OTHER -> {}
 
 Deadlock[self \in Proc] == self \in WaitingFor[self, {}]
 
@@ -218,7 +219,7 @@ Resolve(self) ==
    IN  /\ (* <=> Deadlock[self] *)
            self \in waitingFor
        /\ (* abort a single transaction in deadlock randomly *)
-          \E victim \in waitingFor : Abort(self, victim, "deadlock")
+          \E victim \in waitingFor : Abort(victim, "deadlock")
 
 Next ==
   \/ \E self \in Proc
@@ -229,7 +230,7 @@ Next ==
                  \/ Write(self, hd, tl)
                  \/ Commit(self, hd, tl)
                  \/ Resolve(self)
-       \/ Abort(self, self, "voluntary")
+       \/ Abort(self, "voluntary")
   \/ /\ \A proc \in Proc : state[proc] \in {"Commit", "Abort"}
      /\ UNCHANGED vars
 
@@ -247,5 +248,5 @@ Properties == EventuallyAllCommitOrAbort
 THEOREM Spec => []Invariants /\ Properties
 =============================================================================
 \* Modification History
-\* Last modified Sun Mar 04 11:45:11 JST 2018 by takayuki
+\* Last modified Sun Mar 11 10:30:52 JST 2018 by takayuki
 \* Created Sat Feb 17 10:34:44 JST 2018 by takayuki
