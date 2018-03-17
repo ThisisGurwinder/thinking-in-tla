@@ -1,5 +1,5 @@
 --------------- MODULE PreciselySerializableSnapshotIsolation ---------------
-EXTENDS FiniteSets, Naturals, Sequences, TLC
+EXTENDS FiniteSets, Naturals, Sequences, TLC, Graphs
 
 (***************************************************************************)
 (* This module specifies Serializable Snapshot Isolation (SSI) as well as  *)
@@ -86,26 +86,27 @@ InitValues == [obj \in Object |-> {[ver |-> 0, val |-> [proc |-> 0]]}]
     (* transactions is conflict-serializable.  DependsOn is also used to   *)
     (* implement a Cycle Testing Graph for PSSI.                           *)
     (***********************************************************************)
-    DependsOn[ct \in [Proc -> Nat],
-              st \in [Proc -> State],
-              visiting \in Proc,
-              visited \in SUBSET Proc] ==
-      IF visiting \in visited
+    DependsOn[__state    \in [Proc -> State],
+              __commitTS \in [Proc -> Nat],
+              proc \in Proc] ==
+      IF __state[proc] # Commit
       THEN {}
-      ELSE LET dependsOn(children) ==
-                 children \cup UNION {DependsOn[ct, st, proc, visited \cup {visiting}] : proc \in children}
-               conflict(X, Y) == UNION {Y[obj] : obj \in {obj \in Object : visiting \in X[obj]}}
-               IN LET wr == {r \in conflict(WRITE, SIREAD) : ct[visiting] <= startTS[r] /\ st[r] = Commit}
-                      ww == {w \in conflict(WRITE, WRITE)  : ct[visiting] <= startTS[w] /\ st[w] = Commit}
-                      rw == {w \in conflict(SIREAD, WRITE) : startTS[visiting] < ct[w]  /\ st[w] = Commit}
-           IN  UNION {
-                 dependsOn(wr \ {visiting}),
-                 dependsOn(ww \ {visiting}),
-                 dependsOn(rw \ {visiting})}
+      ELSE LET from == proc
+               conflict(X, Y) == UNION {Y[obj] : obj \in {obj \in Object : proc \in X[obj]}}
+           IN LET wr == {r \in conflict(WRITE, SIREAD) : __commitTS[from] <= startTS[r] /\ __state[r] = Commit}
+                  ww == {w \in conflict(WRITE, WRITE)  : __commitTS[from] <= startTS[w] /\ __state[w] = Commit}
+                  rw == {w \in conflict(SIREAD, WRITE) : startTS[from] < __commitTS[w]  /\ __state[w] = Commit}
+              IN  UNION {{<<from, to>> : to \in (wr \ {from})},
+                         {<<from, to>> : to \in (ww \ {from})},
+                         {<<from, to>> : to \in (rw \ {from})}}
 
-    ConflictSerializable ==
-      \A proc \in {proc \in Proc : state[proc] = Commit}
-      : proc \notin DependsOn[commitTS, state, proc, {}]
+    __ConflictSerializable[__state    \in [Proc -> State],
+                           __commitTS \in [Proc -> Nat]] ==
+      LET edge == UNION {DependsOn[__state, __commitTS, proc] : proc \in Proc}
+          node == UNION {{from, to} : <<from, to>> \in edge}
+      IN ~IsCycle([edge |-> edge, node |-> node])
+
+    ConflictSerializable == __ConflictSerializable[state, commitTS]
 
     (***********************************************************************)
     (* ViewSerializable asserts that, if some of transactions successfully *)
@@ -127,20 +128,22 @@ InitValues == [obj \in Object |-> {[ver |-> 0, val |-> [proc |-> 0]]}]
                  [] OTHER
                     -> viewEq(s, Tail(hist))
 
+    RECURSIVE concat(_, _, _, _)
+    concat(f, n, size, acc) ==
+      IF n > size THEN acc ELSE concat(f, n+1, size, acc \o f[n])
+
     ViewSerializable ==
-      LET Tx == {SelectSeq(history, LAMBDA x: x.proc = proc) : proc
-                 \in {proc \in Proc : state[proc] = Commit}}
+      LET commit == SelectSeq(history, LAMBDA x: x.op.f = "Commit")
+          Tx == {SelectSeq(history, LAMBDA x: x.proc = proc)
+                 : proc \in {commit[i].proc : i \in 1..Len(commit)}}
           perms == {f \in [1..Cardinality(Tx) -> Tx]
                     : \A tx \in Tx
-                      : \E idx \in 1..Cardinality(Tx) : f[idx] = tx}
-       IN LET RECURSIVE concat(_, _, _, _)
-              concat(f, n, size, acc) ==
-                IF n > size THEN acc ELSE concat(f, n+1, size, acc \o f[n])
-          IN  \E perm \in perms
-              : viewEq([obj \in Object |-> [proc |-> 0]],
-                       concat(perm, 1, Cardinality(Tx), <<>>))
-\*            /\ \/ Cardinality(Tx) < 2
-\*               \/ PrintT(<<history, concat(perm, 1, Cardinality(Tx), <<>>)>>)
+                      : \E i \in 1..Cardinality(Tx) : f[i] = tx}
+      IN  \E perm \in perms
+          : LET serialHistory == concat(perm, 1, Cardinality(Tx), <<>>)
+            IN  viewEq([obj \in Object |-> [proc |-> 0]], serialHistory)
+\*                /\ \/ Cardinality(Tx) < 2
+\*                   \/ PrintT(<<history, serialHistory>>)
 
     Invariants ==
       /\ TypeOK
@@ -149,20 +152,25 @@ InitValues == [obj \in Object |-> {[ver |-> 0, val |-> [proc |-> 0]]}]
       /\ ViewSerializable
 
     (***********************************************************************)
-    (* Deadlock asserts that a process is stopping in a deadlock           *)
+    (* WaitingFor builds a set of edges of dependency graph in which a     *)
+    (* cycle occurs when deadlock has happened.                            *)
     (***********************************************************************)
-    WaitingFor[visiting \in Proc, visited \in SUBSET Proc] ==
-      IF visiting \in visited \/ state[visiting] # Running
+    WaitingFor[proc \in Proc] ==
+      IF state[proc] # "Running"
       THEN {}
-      ELSE LET dependsOn(children) ==
-                 children \cup UNION {WaitingFor[proc, visited \cup {visiting}]
-                                      : proc \in children}
-               hd == Head(transact[visiting])
-           IN CASE hd.f = Write
-                     -> dependsOn(WRITE[hd.obj] \ {visiting})
-                [] OTHER -> {}
+      ELSE LET from == proc
+               hd == Head(transact[from])
+               edges(TO) == {<<from, to>> : to \in TO}
+           IN  CASE hd.f = "Write"
+                      -> edges(WRITE[hd.obj] \ {from})
+                 [] OTHER -> {}
 
-    Deadlock[self \in Proc] == self \in WaitingFor[self, {}]
+    Dependency ==
+      LET edge == UNION {WaitingFor[proc] : proc \in Proc}
+          node == UNION {{from, to} : <<from, to>> \in edge}
+      IN  [edge |-> edge, node |-> node]
+
+    Deadlock == IsCycle(Dependency)
 
     (***********************************************************************)
     (* A temporal property asserts that all transactions eventually commit *)
@@ -250,9 +258,9 @@ InitValues == [obj \in Object |-> {[ver |-> 0, val |-> [proc |-> 0]]}]
          or
          { await Hd[self].f = Commit;
            if (/\ SERIALIZE
-               /\ LET ct == [commitTS EXCEPT ![self] = ts + 1]
-                      st == [state EXCEPT ![self] = Commit]
-                  IN  self \in DependsOn[ct, st, self, {}])
+               /\ LET __state    == [state    EXCEPT ![self] = Commit]
+                      __commitTS == [commitTS EXCEPT ![self] = ts + 1]
+                  IN  ~__ConflictSerializable[__state, __commitTS])
            { Abort(self, "Cycle-Testing-Graph");
            }
            else
@@ -268,9 +276,11 @@ InitValues == [obj \in Object |-> {[ver |-> 0, val |-> [proc |-> 0]]}]
            }
          }
          or
-         { await Deadlock[self];
-           (* abort a single transaction in deadlock randomly *)
-           with (victim \in WaitingFor[self, {}]) {
+         { await Deadlock;
+           (****************************************************************)
+           (* Aborts a transaction involved in deadlock                    *)
+           (****************************************************************)
+           with (victim \in {proc \in Proc : IsInCycle(proc, Dependency)}) {
              Abort(victim, "deadlock");
            };
          }
@@ -316,26 +326,27 @@ LockOK ==
 
 
 
-DependsOn[ct \in [Proc -> Nat],
-          st \in [Proc -> State],
-          visiting \in Proc,
-          visited \in SUBSET Proc] ==
-  IF visiting \in visited
+DependsOn[__state    \in [Proc -> State],
+          __commitTS \in [Proc -> Nat],
+          proc \in Proc] ==
+  IF __state[proc] # Commit
   THEN {}
-  ELSE LET dependsOn(children) ==
-             children \cup UNION {DependsOn[ct, st, proc, visited \cup {visiting}] : proc \in children}
-           conflict(X, Y) == UNION {Y[obj] : obj \in {obj \in Object : visiting \in X[obj]}}
-           IN LET wr == {r \in conflict(WRITE, SIREAD) : ct[visiting] <= startTS[r] /\ st[r] = Commit}
-                  ww == {w \in conflict(WRITE, WRITE)  : ct[visiting] <= startTS[w] /\ st[w] = Commit}
-                  rw == {w \in conflict(SIREAD, WRITE) : startTS[visiting] < ct[w]  /\ st[w] = Commit}
-       IN  UNION {
-             dependsOn(wr \ {visiting}),
-             dependsOn(ww \ {visiting}),
-             dependsOn(rw \ {visiting})}
+  ELSE LET from == proc
+           conflict(X, Y) == UNION {Y[obj] : obj \in {obj \in Object : proc \in X[obj]}}
+       IN LET wr == {r \in conflict(WRITE, SIREAD) : __commitTS[from] <= startTS[r] /\ __state[r] = Commit}
+              ww == {w \in conflict(WRITE, WRITE)  : __commitTS[from] <= startTS[w] /\ __state[w] = Commit}
+              rw == {w \in conflict(SIREAD, WRITE) : startTS[from] < __commitTS[w]  /\ __state[w] = Commit}
+          IN  UNION {{<<from, to>> : to \in (wr \ {from})},
+                     {<<from, to>> : to \in (ww \ {from})},
+                     {<<from, to>> : to \in (rw \ {from})}}
 
-ConflictSerializable ==
-  \A proc \in {proc \in Proc : state[proc] = Commit}
-  : proc \notin DependsOn[commitTS, state, proc, {}]
+__ConflictSerializable[__state    \in [Proc -> State],
+                       __commitTS \in [Proc -> Nat]] ==
+  LET edge == UNION {DependsOn[__state, __commitTS, proc] : proc \in Proc}
+      node == UNION {{from, to} : <<from, to>> \in edge}
+  IN ~IsCycle([edge |-> edge, node |-> node])
+
+ConflictSerializable == __ConflictSerializable[state, commitTS]
 
 
 
@@ -357,18 +368,20 @@ viewEq(s, hist) ==
              [] OTHER
                 -> viewEq(s, Tail(hist))
 
+RECURSIVE concat(_, _, _, _)
+concat(f, n, size, acc) ==
+  IF n > size THEN acc ELSE concat(f, n+1, size, acc \o f[n])
+
 ViewSerializable ==
-  LET Tx == {SelectSeq(history, LAMBDA x: x.proc = proc) : proc
-             \in {proc \in Proc : state[proc] = Commit}}
+  LET commit == SelectSeq(history, LAMBDA x: x.op.f = "Commit")
+      Tx == {SelectSeq(history, LAMBDA x: x.proc = proc)
+             : proc \in {commit[i].proc : i \in 1..Len(commit)}}
       perms == {f \in [1..Cardinality(Tx) -> Tx]
                 : \A tx \in Tx
-                  : \E idx \in 1..Cardinality(Tx) : f[idx] = tx}
-   IN LET RECURSIVE concat(_, _, _, _)
-          concat(f, n, size, acc) ==
-            IF n > size THEN acc ELSE concat(f, n+1, size, acc \o f[n])
-      IN  \E perm \in perms
-          : viewEq([obj \in Object |-> [proc |-> 0]],
-                   concat(perm, 1, Cardinality(Tx), <<>>))
+                  : \E i \in 1..Cardinality(Tx) : f[i] = tx}
+  IN  \E perm \in perms
+      : LET serialHistory == concat(perm, 1, Cardinality(Tx), <<>>)
+        IN  viewEq([obj \in Object |-> [proc |-> 0]], serialHistory)
 
 
 
@@ -381,18 +394,23 @@ Invariants ==
 
 
 
-WaitingFor[visiting \in Proc, visited \in SUBSET Proc] ==
-  IF visiting \in visited \/ state[visiting] # Running
-  THEN {}
-  ELSE LET dependsOn(children) ==
-             children \cup UNION {WaitingFor[proc, visited \cup {visiting}]
-                                  : proc \in children}
-           hd == Head(transact[visiting])
-       IN CASE hd.f = Write
-                 -> dependsOn(WRITE[hd.obj] \ {visiting})
-            [] OTHER -> {}
 
-Deadlock[self \in Proc] == self \in WaitingFor[self, {}]
+WaitingFor[proc \in Proc] ==
+  IF state[proc] # "Running"
+  THEN {}
+  ELSE LET from == proc
+           hd == Head(transact[from])
+           edges(TO) == {<<from, to>> : to \in TO}
+       IN  CASE hd.f = "Write"
+                  -> edges(WRITE[hd.obj] \ {from})
+             [] OTHER -> {}
+
+Dependency ==
+  LET edge == UNION {WaitingFor[proc] : proc \in Proc}
+      node == UNION {{from, to} : <<from, to>> \in edge}
+  IN  [edge |-> edge, node |-> node]
+
+Deadlock == IsCycle(Dependency)
 
 
 
@@ -457,9 +475,9 @@ L20(self) == /\ pc[self] = "L20"
                               /\ UNCHANGED <<transact, state, history, store, ts, commitTS, SIREAD>>
                            \/ /\ Hd[self].f = Commit
                               /\ IF /\ SERIALIZE
-                                    /\ LET ct == [commitTS EXCEPT ![self] = ts + 1]
-                                           st == [state EXCEPT ![self] = Commit]
-                                       IN  self \in DependsOn[ct, st, self, {}]
+                                    /\ LET __state    == [state    EXCEPT ![self] = Commit]
+                                           __commitTS == [commitTS EXCEPT ![self] = ts + 1]
+                                       IN  ~__ConflictSerializable[__state, __commitTS]
                                     THEN /\ state' = [state EXCEPT ![self] = Abort]
                                          /\ history' = Append(history, [proc |-> self, op |-> ([f |-> Abort])])
                                          /\ UNCHANGED << transact, store, ts, 
@@ -476,8 +494,8 @@ L20(self) == /\ pc[self] = "L20"
                                          /\ transact' = [transact EXCEPT ![self] = Tl[self]]
                               /\ pc' = [pc EXCEPT ![self] = "L20"]
                               /\ UNCHANGED <<SIREAD, WRITE>>
-                           \/ /\ Deadlock[self]
-                              /\ \E victim \in WaitingFor[self, {}]:
+                           \/ /\ Deadlock
+                              /\ \E victim \in {proc \in Proc : IsInCycle(proc, Dependency)}:
                                    /\ state' = [state EXCEPT ![victim] = Abort]
                                    /\ history' = Append(history, [proc |-> victim, op |-> ([f |-> Abort])])
                               /\ pc' = [pc EXCEPT ![self] = "L20"]
@@ -538,5 +556,5 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Mar 11 16:37:04 JST 2018 by takayuki
+\* Last modified Sat Mar 17 18:54:52 JST 2018 by takayuki
 \* Created Wed Mar 07 16:46:38 JST 2018 by takayuki

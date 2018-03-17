@@ -25,6 +25,7 @@
 <listAttribute key="modelCorrectnessInvariants">
 <listEntry value="1TypeOK"/>
 <listEntry value="1LockOK"/>
+<listEntry value="1ConflictSerializable"/>
 <listEntry value="1ViewSerializable"/>
 </listAttribute>
 <listAttribute key="modelCorrectnessProperties">
