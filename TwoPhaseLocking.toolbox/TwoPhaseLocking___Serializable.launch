@@ -6,10 +6,6 @@
 <intAttribute key="dfidDepth" value="100"/>
 <booleanAttribute key="dfidMode" value="false"/>
 <intAttribute key="distributedFPSetCount" value="0"/>
-<stringAttribute key="distributedNetworkInterface" value="192.168.100.7"/>
-<intAttribute key="distributedNodesCount" value="1"/>
-<stringAttribute key="distributedTLC" value="off"/>
-<stringAttribute key="distributedTLCVMArgs" value=""/>
 <intAttribute key="fpBits" value="1"/>
 <intAttribute key="fpIndex" value="1"/>
 <intAttribute key="maxHeapSize" value="25"/>
@@ -26,6 +22,7 @@
 <listEntry value="1TypeOK"/>
 <listEntry value="1LockOK"/>
 <listEntry value="1ViewSerializable"/>
+<listEntry value="1ViewSerializableInCommitOrder"/>
 </listAttribute>
 <listAttribute key="modelCorrectnessProperties">
 <listEntry value="1EventuallyAllCommitOrAbort"/>

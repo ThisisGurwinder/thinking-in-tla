@@ -1,5 +1,5 @@
 -------------------------- MODULE TwoPhaseLocking --------------------------
-EXTENDS FiniteSets, Naturals, Sequences, TLC
+EXTENDS FiniteSets, Naturals, Sequences, TLC, Graphs
 
 CONSTANT Proc, Object, MAXTXOPS
 
@@ -150,19 +150,34 @@ viewEq(s, hist) ==
              [] OTHER
                 -> viewEq(s, Tail(hist))
 
+RECURSIVE concat(_, _, _, _)
+concat(f, n, size, acc) ==
+  IF n > size THEN acc ELSE concat(f, n+1, size, acc \o f[n])
+
 ViewSerializable ==
-  LET Tx == {SelectSeq(history, LAMBDA x: x.proc = proc) : proc
-             \in {proc \in Proc : state[proc] = "Commit"}}
+  LET commit == SelectSeq(history, LAMBDA x: x.op.f = "Commit")
+      Tx == {SelectSeq(history, LAMBDA x: x.proc = proc) : proc
+             \in {commit[i].proc : i \in 1..Len(commit)}}
       perms == {f \in [1..Cardinality(Tx) -> Tx]
                     : \A tx \in Tx
-                      : \E proc \in 1..Cardinality(Tx) : f[proc] = tx}
-   IN LET RECURSIVE concat(_, _, _, _)
-          concat(f, n, size, acc) ==
-            IF n > size THEN acc ELSE concat(f, n+1, size, acc \o f[n])
-       IN \E perm \in perms
-          : viewEq(InitValues, concat(perm, 1, Cardinality(Tx), <<>>))
-\*            /\ \/ Cardinality(Tx) < 2
-\*               \/ PrintT(<<history, concat(perm, 1, Cardinality(Tx), <<>>)>>)
+                      : \E i \in 1..Cardinality(Tx) : f[i] = tx}
+  IN  \E perm \in perms
+      : viewEq(InitValues, concat(perm, 1, Cardinality(Tx), <<>>))
+\*      /\ \/ Cardinality(Tx) < 2
+\*         \/ PrintT(<<history, concat(perm, 1, Cardinality(Tx), <<>>)>>)
+
+(***************************************************************************)
+(* ViewSerializableInCommitOrder is stronger than ViewSerializable in that *)
+(* serialization order is restricted to commit order.                      *)
+(***************************************************************************)
+ViewSerializableInCommitOrder ==
+  LET commit == SelectSeq(history, LAMBDA x: x.op.f = "Commit")
+      tx == [i \in 1..Len(commit)
+             |-> SelectSeq(history, LAMBDA x: x.proc = commit[i].proc)]
+      serialHistory == concat(tx, 1, Len(tx), <<>>)
+  IN viewEq(InitValues, serialHistory)
+\*     /\ \/ Len(tx) < 2
+\*        \/ PrintT(<<history, serialHistory>>)
 
 (***************************************************************************)
 (* Invariants are a set of state predicates to assert that all states and  *)
@@ -194,32 +209,33 @@ LockOK ==
 Invariants ==
   /\ TypeOK
   /\ LockOK
-  /\ ViewSerializable
+  /\ ViewSerializableInCommitOrder
 
 (***************************************************************************)
-(* Deadlock asserts that a process is stopping in a deadlock               *)
+(* WaitingFor builds a set of edges of dependency graph in which a cycle   *)
+(* occurs when deadlock has happened.                                      *)
 (***************************************************************************)
-WaitingFor[visiting \in Proc, visited \in SUBSET Proc] ==
-  IF visiting \in visited \/ state[visiting] # "Running"
+WaitingFor[proc \in Proc] ==
+  IF state[proc] # "Running"
   THEN {}
-  ELSE LET dependsOn(children) ==
-             children \cup UNION {WaitingFor[proc, visited \cup {visiting}]
-                                  : proc \in children}
-           hd == Head(transact[visiting])
+  ELSE LET from == proc
+           hd == Head(transact[from])
+           edges(TO) == {<<from, to>> : to \in TO}
        IN  CASE hd.f = "Read"
-                  -> dependsOn(WRITE[hd.obj] \ {visiting})
+                  -> edges(WRITE[hd.obj] \ {from})
              [] hd.f = "Write"
-                  -> dependsOn((READ[hd.obj] \cup WRITE[hd.obj]) \ {visiting})
+                  -> edges((READ[hd.obj] \cup WRITE[hd.obj]) \ {from})
              [] OTHER -> {}
 
-Deadlock[self \in Proc] == self \in WaitingFor[self, {}]
-
+(***************************************************************************)
+(* Resolve aborts a transaction involved in deadlock and try to resolve.   *)
+(***************************************************************************)
 Resolve(self) ==
-  LET waitingFor == WaitingFor[self, {}]
-   IN  /\ (* <=> Deadlock[self] *)
-           self \in waitingFor
-       /\ (* abort a single transaction in deadlock randomly *)
-          \E victim \in waitingFor : Abort(victim, "deadlock")
+  LET edge == UNION {WaitingFor[proc] : proc \in Proc}
+      node == UNION {{from, to} : <<from, to>> \in edge}
+      dependency == [edge |-> edge, node |-> node]
+   IN  \E victim \in {t \in node : IsInCycle(t, dependency)}
+        : Abort(victim, "deadlock")
 
 Next ==
   \/ \E self \in Proc
@@ -248,5 +264,5 @@ Properties == EventuallyAllCommitOrAbort
 THEOREM Spec => []Invariants /\ Properties
 =============================================================================
 \* Modification History
-\* Last modified Sun Mar 11 10:30:52 JST 2018 by takayuki
+\* Last modified Sat Mar 17 14:37:51 JST 2018 by takayuki
 \* Created Sat Feb 17 10:34:44 JST 2018 by takayuki
