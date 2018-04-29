@@ -32,16 +32,8 @@ MAX(S) == CHOOSE s \in S : \A t \in S : s >= t
 CTRL == "ctrl"
 
 (***************************************************************************)
-(* Instr is a set of instructions visible to user.  Note that "0" and "1"  *)
-(* are virtual registers that represent immediate values.                  *)
+(* Instr is a set of instructions visible to user                          *)
 (***************************************************************************)
-LOAD   == "LOAD"
-STORE  == "STORE"
-
-SFENCE == "SFENCE"
-LFENCE == "LFENCE"
-MFENCE == "MFENCE"
-
 MOV    == "MOV"
 CMP    == "CMP"
 SUB    == "SUB"
@@ -55,21 +47,36 @@ XCHG   == "XCHG"
 DEC    == "DEC"
 CMPXCHG == "CMPXCHG"
 
+SFENCE == "SFENCE"
+LFENCE == "LFENCE"
+MFENCE == "MFENCE"
+
+(***************************************************************************)
+(* Note that "0" and "1" are virtual registers that represent immediate    *)
+(* values.  Register "r0" is reserved for internal use.                    *)
+(***************************************************************************)
+RegRev == {"r0"}
+Imm == {"0", "1"}
+
 IP == 1..(MAX({Len(t) : t \in RANGE(Code)}) + 1)
 
 Instr == UNION {
-  [op : {LOAD, XCHG}, reg : Reg, addr : Addr],
-  [op : {STORE}, addr : Addr, reg : ({"0", "1"} \cup Reg)],
-  [op : {SFENCE, LFENCE, MFENCE, NOP}],
-  [op : {MOV, CMP, SUB}, dst : Reg, src : ({"0", "1"} \cup Reg)],
+  [op : {MOV}, dst : Reg, src : Addr],
+  [op : {MOV}, dst : Reg, src : Imm \cup Reg],
+  [op : {MOV}, dst : Addr, src : Imm \cup Reg],
+  [op : {CMP, SUB}, dst : Reg, src : Imm \cup Reg],
   [op : {JNZ, JNS, JLE, JMP}, label: IP],
-  [op : {DEC}, addr : Addr, reg : Reg],
-  [op : {CMPXCHG}, addr : Addr, dst : Reg, src : ({"0", "1"} \cup Reg)]
+  [op : {XCHG}, addr : Addr, reg : Reg],
+  [op : {DEC}, addr : Addr],
+  [op : {CMPXCHG}, addr : Addr, dst : Reg, src : Imm \cup Reg],
+  [op : {SFENCE, LFENCE, MFENCE, NOP}]
 }
 
 (***************************************************************************)
-(* LOCK and UNLOCK are internal events under x86-TSO.                      *)
+(* Events under x86-TSO.  Some of Instr are used as Events as well.        *)
 (***************************************************************************)
+LOAD   == "LOAD"
+STORE  == "STORE"
 LOCK   == "LOCK"
 UNLOCK == "UNLOCK"
 
@@ -86,10 +93,10 @@ SC     == "store-conditional"
 (* Event is a set of events executed under x86-TSO.                        *)
 (***************************************************************************)
 Event == UNION {
-  [ip : IP, op : {LOAD}, reg : Reg, addr : Addr],
-  [ip : IP, op : {STORE}, addr : Addr, reg : ({"0", "1"} \cup Reg)],
+  [ip : IP, op : {LOAD}, reg : RegRev \cup Reg, addr : Addr],
+  [ip : IP, op : {STORE}, addr : Addr, reg : Imm \cup RegRev \cup Reg],
   [ip : IP, op : {SFENCE, LFENCE, MFENCE, NOP}],
-  [ip : IP, op : {MOV, CMP, SUB}, dst : Reg, src :({"0", "1"} \cup Reg)],
+  [ip : IP, op : {MOV, CMP, SUB}, dst : Reg, src : Imm \cup RegRev \cup Reg],
   [ip : IP, op : {JNZ, JNS, JLE, JMP}, label: IP],
   [ip : IP, op : {LOCK, UNLOCK}],
   [ip : IP, op : {PUSH, POP}, reg : Reg],
@@ -97,12 +104,27 @@ Event == UNION {
   [ip : IP, op : {SC}, addr : Addr, src : Reg, dst : Reg]
 }
 
+(***************************************************************************)
+(* Decode instructions users provide in model into events under x85-TSO.   *)
+(***************************************************************************)
 Decode[ip \in IP, code \in Seq(Instr)] ==
   IF code = <<>>
   THEN <<>>
   ELSE LET hd == Head(code)
            tl == Tail(code)
-    IN CASE hd.op = XCHG
+    IN CASE hd.op = MOV /\ hd.dst \in Reg /\ hd.src \in Addr
+         -> Map(LAMBDA x : [ip |-> ip] @@ x,
+                <<[op |-> LOAD, reg |-> hd.dst, addr |-> hd.src]>>)
+            \o Decode[ip + 1, tl]
+       [] hd.op = MOV /\ hd.dst \in Addr /\ hd.src \in (Imm \cup Reg)
+         -> Map(LAMBDA x : [ip |-> ip] @@ x,
+                <<[op |-> STORE, addr |-> hd.dst, reg |-> hd.src]>>)
+            \o Decode[ip + 1, tl]
+       [] hd.op = MOV /\ hd.dst \in Reg /\ hd.src \in (Imm \cup Reg)
+         -> Map(LAMBDA x : [ip |-> ip] @@ x,
+                <<[op |-> MOV, dst |-> hd.dst, src |-> hd.src]>>)
+            \o Decode[ip + 1, tl]
+       [] hd.op = XCHG
          -> Map(LAMBDA x : [ip |-> ip] @@ x,
                 <<[op |-> LOCK],
                   [op |-> PUSH, reg |-> hd.reg],
@@ -117,9 +139,9 @@ Decode[ip \in IP, code \in Seq(Instr)] ==
        [] Head(code).op = DEC
          -> Map(LAMBDA x : [ip |-> ip] @@ x,
                 <<[op |-> LOCK],
-                  [op |-> LOAD, reg |-> hd.reg, addr |-> hd.addr],
-                  [op |-> SUB, dst |-> hd.reg, src |-> "1"],
-                  [op |-> STORE, addr |-> hd.addr, reg |-> hd.reg],
+                  [op |-> LOAD, reg |-> "r0", addr |-> hd.addr],
+                  [op |-> SUB, dst |-> "r0", src |-> "1"],
+                  [op |-> STORE, addr |-> hd.addr, reg |-> "r0"],
                   [op |-> UNLOCK]>>)
             \o Decode[ip + 1, tl]
        [] Head(code).op = CMPXCHG
@@ -145,7 +167,7 @@ ASSUME
 (***************************************************************************
 --algorithm X86TSO {
   variables
-    reg = [proc \in Proc |-> InitReg];
+    reg = [proc \in Proc |-> [r \in RegRev |-> 0] @@ InitReg];
     mem = InitMem;
     lock = {};
     writeBuffer = [proc \in Proc |-> <<>>]
@@ -165,7 +187,7 @@ ASSUME
 
     TypeOK ==
       /\ \A proc \in Proc :
-           /\ reg[proc] \in [Reg -> Value]
+           /\ reg[proc] \in [RegRev \cup Reg -> Value]
            /\ writeBuffer[proc]
               \in Seq([addr : Addr, value : Value])
       /\  mem \in [Addr -> Value]
@@ -385,7 +407,7 @@ ReadFromRegister(p, r) ==
 
 TypeOK ==
   /\ \A proc \in Proc :
-       /\ reg[proc] \in [Reg -> Value]
+       /\ reg[proc] \in [RegRev \cup Reg -> Value]
        /\ writeBuffer[proc]
           \in Seq([addr : Addr, value : Value])
   /\  mem \in [Addr -> Value]
@@ -401,7 +423,7 @@ vars == << reg, mem, lock, writeBuffer, pc, code, cf, sf, zf, stack >>
 ProcSet == {CTRL} \cup (Proc)
 
 Init == (* Global variables *)
-        /\ reg = [proc \in Proc |-> InitReg]
+        /\ reg = [proc \in Proc |-> [r \in RegRev |-> 0] @@ InitReg]
         /\ mem = InitMem
         /\ lock = {}
         /\ writeBuffer = [proc \in Proc |-> <<>>]
@@ -543,5 +565,5 @@ Spec == /\ Init /\ [][Next]_vars
 
 =============================================================================
 \* Modification History
-\* Last modified Sun Apr 29 10:32:31 JST 2018 by takayuki
+\* Last modified Sun Apr 29 13:49:54 JST 2018 by takayuki
 \* Created Sun Apr 15 22:38:22 JST 2018 by takayuki
